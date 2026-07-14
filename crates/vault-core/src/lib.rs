@@ -6,29 +6,36 @@
 pub mod crypto;
 pub mod format;
 pub mod lockout;
-pub mod recovery;
 pub mod walk;
 
+use std::path::PathBuf;
 use thiserror::Error;
 
 /// Plaintext chunk size for streaming encryption (see SPEC.md).
 pub const CHUNK_SIZE: usize = 1024 * 1024;
 
-/// Container magic: "FVLT" + version 1.
-pub const MAGIC: [u8; 8] = *b"FVLT\x00\x01\x00\x00";
+/// Container magic: "FVLT" + format version 1.
+pub const MAGIC: [u8; 4] = *b"FVLT";
+pub const VERSION: u32 = 1;
 
 #[derive(Debug, Error)]
 pub enum VaultError {
     #[error("wrong password ({attempts_left} attempts remaining)")]
     WrongPassword { attempts_left: u32 },
-    #[error("locked out until {until_unix} (unix time)")]
+    #[error("locked out until unix time {until_unix}")]
     LockedOut { until_unix: u64 },
     #[error("container is corrupt or has been tampered with")]
     Tampered,
     #[error("not a FolderVault container")]
     BadMagic,
-    #[error("unsupported container version")]
-    BadVersion,
+    #[error("unsupported container version {0}")]
+    BadVersion(u32),
+    #[error("destination already exists: {0}")]
+    Exists(PathBuf),
+    #[error("unsupported item: {0}")]
+    Unsupported(String),
+    #[error("{0}")]
+    Other(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }

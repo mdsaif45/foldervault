@@ -30,3 +30,20 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = "symbols"
+
+# ...except the crypto hot path, where opt-level=z would gut AES-NI/Argon2
+# throughput. Speed-optimizing just these keeps the binary small.
+[profile.release.package.aes]
+opt-level = 3
+[profile.release.package.aes-gcm]
+opt-level = 3
+[profile.release.package.ghash]
+opt-level = 3
+[profile.release.package.polyval]
+opt-level = 3
+[profile.release.package.ctr]
+opt-level = 3
+[profile.release.package.argon2]
+opt-level = 3
+[profile.release.package.sha2]
+opt-level = 3

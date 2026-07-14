@@ -10,18 +10,13 @@ path = "src/main.rs"
 
 [dependencies]
 vault-core = { path = "../vault-core" }
-windows = { version = "0.58", features = [
-    "Win32_Foundation",
-    "Win32_Graphics_Gdi",
-    "Win32_Graphics_Dwm",
-    "Win32_UI_WindowsAndMessaging",
-    "Win32_UI_Input_KeyboardAndMouse",
-    "Win32_UI_Shell",
-    "Win32_UI_HiDpi",
-    "Win32_System_LibraryLoader",
-    "Win32_System_Registry",
-    "Win32_Security_Cryptography", # DPAPI for install.key
-] }
-
-[build-dependencies]
-winres = "0.1"   # embeds assets/foldervault.ico + version info + manifest
+# Enabled in phase 3 (GUI) — kept off until then so workspace builds stay fast:
+# windows = { version = "0.58", features = [
+#     "Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Graphics_Dwm",
+#     "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse",
+#     "Win32_UI_Shell", "Win32_UI_HiDpi", "Win32_System_LibraryLoader",
+#     "Win32_System_Registry", "Win32_Security_Cryptography",
+# ] }
+#
+# [build-dependencies]
+# winres = "0.1"   # embeds assets/foldervault.ico + version info + manifest
