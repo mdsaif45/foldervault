@@ -1,8 +1,8 @@
-# FolderVault — one-time toolchain setup
+# FolderVault - one-time toolchain setup
 # Rust (rustup) is already installed. This adds the MSVC C++ toolset that
-# `x86_64-pc-windows-msvc` needs for linking (link.exe + Windows SDK).
+# the x86_64-pc-windows-msvc target needs for linking (link.exe + Windows SDK).
 #
-# Run from an elevated PowerShell (right-click → Run as administrator):
+# Run from an elevated PowerShell (right-click -> Run as administrator):
 #   powershell -ExecutionPolicy Bypass -File .\setup-toolchain.ps1
 
 $ErrorActionPreference = 'Stop'
@@ -21,7 +21,7 @@ if ((Test-Path $vsInstaller) -and (Test-Path $vsPath)) {
 }
 else {
     # Fallback: standalone Build Tools (~2 GB, no full IDE).
-    Write-Host "VS not found — installing standalone Build Tools via winget..." -ForegroundColor Cyan
+    Write-Host "VS not found - installing standalone Build Tools via winget..." -ForegroundColor Cyan
     winget install Microsoft.VisualStudio.2022.BuildTools --override `
         "--wait --passive --add Microsoft.VisualStudio.Component.VC.Tools.x86.x64 --add Microsoft.VisualStudio.Component.Windows11SDK.26100"
 }
