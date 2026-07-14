@@ -1,0 +1,23 @@
+Windows Registry Editor Version 5.00
+
+; Dev-only registration (vault-app's `setup` command does this programmatically).
+; Adjust the exe path if your target dir differs. HKCU = no admin needed.
+
+[HKEY_CURRENT_USER\Software\Classes\Directory\shell\FolderVault.Lock]
+@="Lock with FolderVault"
+"Icon"="D:\\my-quests\\side-projects\\foldervault\\target\\release\\FolderVault.exe,0"
+
+[HKEY_CURRENT_USER\Software\Classes\Directory\shell\FolderVault.Lock\command]
+@="\"D:\\my-quests\\side-projects\\foldervault\\target\\release\\FolderVault.exe\" lock \"%1\""
+
+[HKEY_CURRENT_USER\Software\Classes\.fvlt]
+@="FolderVault.Container"
+
+[HKEY_CURRENT_USER\Software\Classes\FolderVault.Container]
+@="Locked Folder (FolderVault)"
+
+[HKEY_CURRENT_USER\Software\Classes\FolderVault.Container\DefaultIcon]
+@="D:\\my-quests\\side-projects\\foldervault\\target\\release\\FolderVault.exe,1"
+
+[HKEY_CURRENT_USER\Software\Classes\FolderVault.Container\shell\open\command]
+@="\"D:\\my-quests\\side-projects\\foldervault\\target\\release\\FolderVault.exe\" open \"%1\""

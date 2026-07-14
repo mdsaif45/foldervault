@@ -1,0 +1,32 @@
+[workspace]
+resolver = "2"
+members = ["crates/vault-core", "crates/vault-app", "crates/vault-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+# crypto (RustCrypto — pure Rust with AES-NI intrinsics, nothing to ship)
+aes-gcm = "0.10"
+argon2 = "0.5"
+hmac = "0.12"
+sha2 = "0.10"
+hkdf = "0.12"
+rand_core = { version = "0.6", features = ["getrandom"] }
+zeroize = { version = "1", features = ["derive"] }
+# serialization + parallel walk
+bincode = "1"
+serde = { version = "1", features = ["derive"] }
+rayon = "1"
+uuid = { version = "1", features = ["v4"] }
+thiserror = "1"
+
+# ---- size-tuned release profile: this is where "less binary" comes from ----
+[profile.release]
+opt-level = "z"      # optimize for size
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
