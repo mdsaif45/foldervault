@@ -34,7 +34,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SWP_NOZORDER, SW_HIDE, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_COMMAND, WM_CREATE,
     SetForegroundWindow,
     WM_CTLCOLOREDIT, WM_DESTROY, WM_DRAWITEM, WM_LBUTTONDOWN, WM_NCHITTEST, WM_PAINT,
-    WM_SETFOCUS, WM_SETFONT, WM_TIMER, WNDCLASSEXW, WS_CHILD, WS_EX_APPWINDOW,
+    WM_SETFOCUS, WM_SETFONT, WM_TIMER, WNDCLASSEXW, WS_CHILD, WS_CLIPCHILDREN, WS_EX_APPWINDOW,
     WS_EX_CONTROLPARENT, WS_EX_TOPMOST, WS_POPUP, WS_TABSTOP, WS_VISIBLE,
 };
 
@@ -234,7 +234,7 @@ pub fn run_dialog(mode: Mode, hmac_key: [u8; 32], master_pub: Option<[u8; 32]>) 
             WS_EX_CONTROLPARENT | WS_EX_APPWINDOW | WS_EX_TOPMOST,
             class,
             w!("FolderVault"),
-            WS_POPUP | WS_VISIBLE,
+            WS_POPUP | WS_VISIBLE | WS_CLIPCHILDREN,
             mi.rcWork.left + (mw - w_du) / 2,
             mi.rcWork.top + (mh - h_du) / 2,
             w_du,
@@ -425,9 +425,11 @@ unsafe fn on_create(app: &mut App) {
     let dpi = app.dpi;
     let sc = move |v: i32| (v as f32 * dpi) as i32;
 
-    // password fields leave a gutter on the right for the eye toggle
-    let mk_edit = move |y: i32, h: i32, style: u32, id: isize, eye_gutter: bool| -> HWND {
-        let right_pad = if eye_gutter { sc(44) } else { sc(24) };
+    // All fields reserve the same right gutter so their edges (and the rounded
+    // borders drawn behind them) line up, whether or not an eye toggle sits in
+    // the gutter. Text starts sc(14) in from the field's left edge.
+    let mk_edit = move |y: i32, h: i32, style: u32, id: isize| -> HWND {
+        let right_pad = sc(44);
         CreateWindowExW(
             WINDOW_EX_STYLE(0),
             w!("EDIT"),
@@ -461,19 +463,20 @@ unsafe fn on_create(app: &mut App) {
 
     match &app.mode {
         Mode::Lock { .. } => {
-            app.edit = mk_edit(sc(78), sc(38), (ES_PASSWORD | ES_AUTOHSCROLL) as u32, ID_EDIT, true);
-            app.edit2 = mk_edit(sc(122), sc(38), (ES_PASSWORD | ES_AUTOHSCROLL) as u32, ID_EDIT2, false);
+            app.edit = mk_edit(sc(78), sc(38), (ES_PASSWORD | ES_AUTOHSCROLL) as u32, ID_EDIT);
+            app.edit2 = mk_edit(sc(122), sc(38), (ES_PASSWORD | ES_AUTOHSCROLL) as u32, ID_EDIT2);
             set_cue(app.edit, "Password");
             set_cue(app.edit2, "Confirm password");
-            // eye toggle inside the first (password) field
-            mk_button(cw - sc(24) - sc(30), sc(78) + sc(9), sc(24), sc(20), ID_EYE);
+            // eye toggle in the first field's right gutter (square, fits field),
+            // inset ~10px from the rounded border so it isn't clipped
+            mk_button(cw - sc(24) - sc(38), sc(78) + sc(4), sc(30), sc(30), ID_EYE);
             mk_button(cw - sc(24 + 104), sc(252 - 22 - 36), sc(104), sc(36), ID_PRIMARY);
         }
         Mode::Unlock { .. } => {
-            app.edit = mk_edit(sc(78), sc(38), (ES_PASSWORD | ES_AUTOHSCROLL) as u32, ID_EDIT, true);
+            app.edit = mk_edit(sc(78), sc(38), (ES_PASSWORD | ES_AUTOHSCROLL) as u32, ID_EDIT);
             set_cue(app.edit, "Password");
-            // eye toggle inside the field
-            mk_button(cw - sc(24) - sc(30), sc(78) + sc(9), sc(24), sc(20), ID_EYE);
+            // eye toggle in the field's right gutter, inset from the border
+            mk_button(cw - sc(24) - sc(38), sc(78) + sc(4), sc(30), sc(30), ID_EYE);
             mk_button(cw - sc(24 + 104), sc(214 - 22 - 36), sc(104), sc(36), ID_PRIMARY);
             // "Use recovery code" underlined text link (left-aligned, drawn as link)
             mk_button(sc(24), sc(214 - 22 - 32), sc(160), sc(28), ID_LINK);
