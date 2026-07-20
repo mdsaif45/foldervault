@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/vault-core", "crates/vault-app", "crates/vault-cli"]
+members = ["crates/vault-core", "crates/vault-app", "crates/vault-cli", "crates/vault-shellext"]
 
 [workspace.package]
 version = "0.1.0"

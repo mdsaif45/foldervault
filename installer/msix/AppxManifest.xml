@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Sparse MSIX package for FolderVault's Windows 11 top-level context menu.
+
+  "Sparse" = the package registers the shell extension with Windows but the
+  actual files (FolderVault.exe, vault_shellext.dll) live outside the package,
+  at the ExternalLocation path. This lets a portable/installer build drop its
+  files anywhere and just register this tiny package.
+
+  The <desktop4:Extension Category="windows.fileExplorerContextMenus"> +
+  <com:ComServer> below are what put "Lock with FolderVault" directly in the
+  Win11 right-click menu (not under "Show more options").
+
+  Publisher CN must match the certificate used to sign the .msix. For an
+  unsigned/dev flow, sign with the generated dev cert (see build-release.ps1)
+  and install it into Trusted People first.
+-->
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:uap3="http://schemas.microsoft.com/appx/manifest/uap/windows10/3"
+  xmlns:desktop4="http://schemas.microsoft.com/appx/manifest/desktop/windows10/4"
+  xmlns:desktop5="http://schemas.microsoft.com/appx/manifest/desktop/windows10/5"
+  xmlns:com="http://schemas.microsoft.com/appx/manifest/com/windows10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="uap uap3 desktop4 desktop5 com rescap">
+
+  <Identity
+    Name="FolderVault.ShellExt"
+    Publisher="CN=FolderVault Dev"
+    Version="0.1.0.0"
+    ProcessorArchitecture="x64" />
+
+  <Properties>
+    <DisplayName>FolderVault</DisplayName>
+    <PublisherDisplayName>FolderVault</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+  </Properties>
+
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.22000.0" MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+    <rescap:Capability Name="unvirtualizedResources" />
+  </Capabilities>
+
+  <Applications>
+    <Application Id="FolderVault" Executable="FolderVault.exe" uap10:TrustLevel="mediumIL"
+        xmlns:uap10="http://schemas.microsoft.com/appx/manifest/uap/windows10/10">
+      <uap:VisualElements
+        DisplayName="FolderVault"
+        Description="Lock folders with password encryption"
+        BackgroundColor="transparent"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png"
+        AppListEntry="none" />
+
+      <Extensions>
+        <!-- COM server: the in-proc IExplorerCommand handler DLL -->
+        <com:Extension Category="windows.comServer">
+          <com:ComServer>
+            <com:SurrogateServer DisplayName="FolderVault Shell Command">
+              <com:Class
+                Id="7F9C2E14-4B3A-4E2D-9C7A-A1B2C3D4E5F6"
+                Path="vault_shellext.dll"
+                ThreadingModel="STA" />
+            </com:SurrogateServer>
+          </com:ComServer>
+        </com:Extension>
+
+        <!-- register the command for folders (Directory) -->
+        <desktop4:Extension Category="windows.fileExplorerContextMenus">
+          <desktop4:FileExplorerContextMenus>
+            <desktop5:ItemType Type="Directory">
+              <desktop5:Verb Id="FolderVaultLock" Clsid="7F9C2E14-4B3A-4E2D-9C7A-A1B2C3D4E5F6" />
+            </desktop5:ItemType>
+          </desktop4:FileExplorerContextMenus>
+        </desktop4:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+</Package>

@@ -1,0 +1,24 @@
+[package]
+name = "vault-shellext"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "vault_shellext"
+# cdylib = the in-proc COM server DLL Explorer loads for the Win11 menu.
+crate-type = ["cdylib"]
+
+[dependencies]
+# the #[implement] macro expands to `windows_core::` paths, so this must be
+# in scope as a crate named exactly `windows_core`.
+windows-core = "0.58"
+windows = { version = "0.58", features = [
+    "implement",
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_WindowsAndMessaging",
+] }

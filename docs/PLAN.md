@@ -84,9 +84,13 @@ vault-core has **zero** UI/Win32 dependencies → fully unit-testable on any OS.
 - On Windows 11 the verb appears under "Show more options" (and the classic menu
   directly on Win10). Fixing top-level Win11 placement is Phase 4.
 
-**Phase 4 (Windows 11 modern menu):** sparse MSIX package + `IExplorerCommand`
-COM server DLL (also Rust). This is the only part that needs a DLL loaded by
-Explorer; it does nothing but return the menu item, keeping footprint tiny.
+**Phase 4 (Windows 11 modern menu) — done:** `vault-shellext` cdylib is an
+in-proc `IExplorerCommand` COM server (110 KB) registered by a sparse MSIX
+package (`installer/msix/AppxManifest.xml`). The command does nothing but
+`ShellExecuteW("FolderVault.exe", "lock \"<folder>\"")` — all logic stays in
+the exe. Sparse = the package registers the shell verb but the files live at
+an ExternalLocation, so any build layout can register it. CLSID
+`7F9C2E14-4B3A-4E2D-9C7A-A1B2C3D4E5F6`.
 
 ## Lockout design (3 attempts / 24 h)
 
