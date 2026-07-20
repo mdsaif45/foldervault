@@ -98,6 +98,66 @@ pub fn register(exe: &Path) -> windows::core::Result<()> {
         None,
         &lock_cmd,
     )?;
+    // record where we registered, so we can detect a moved portable build
+    set_value(
+        HKEY_CURRENT_USER,
+        r"Software\FolderVault",
+        Some("RegisteredExe"),
+        &exe,
+    )?;
     unsafe { SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, None, None) };
     Ok(())
+}
+
+/// Cheap idempotent registration for every launch: re-registers only when the
+/// exe path differs from what's recorded (or nothing is recorded yet). This
+/// self-heals a portable build the user moved to a new folder.
+pub fn register_if_needed(exe: &Path) {
+    let want = exe.to_string_lossy().to_string();
+    if read_registered_exe().as_deref() != Some(want.as_str()) {
+        let _ = register(exe);
+    }
+}
+
+fn read_registered_exe() -> Option<String> {
+    use windows::Win32::System::Registry::{RegGetValueW, RRF_RT_REG_SZ};
+    unsafe {
+        let subkey = wide(r"Software\FolderVault");
+        let name = wide("RegisteredExe");
+        let mut buf = [0u16; 32768];
+        let mut size = (buf.len() * 2) as u32;
+        let rc = RegGetValueW(
+            HKEY_CURRENT_USER,
+            PCWSTR(subkey.as_ptr()),
+            PCWSTR(name.as_ptr()),
+            RRF_RT_REG_SZ,
+            None,
+            Some(buf.as_mut_ptr() as *mut _),
+            Some(&mut size),
+        );
+        if rc.is_ok() {
+            let n = (size as usize / 2).saturating_sub(1); // drop trailing NUL
+            Some(String::from_utf16_lossy(&buf[..n]))
+        } else {
+            None
+        }
+    }
+}
+
+/// Remove all HKCU integration (used by the installer's uninstaller via
+/// `FolderVault.exe unregister`).
+pub fn unregister() {
+    use windows::Win32::System::Registry::RegDeleteTreeW;
+    unsafe {
+        for sub in [
+            r"Software\Classes\Directory\shell\FolderVault.Lock",
+            r"Software\Classes\FolderVault.Container",
+            r"Software\Classes\.fvlt",
+            r"Software\FolderVault",
+        ] {
+            let w = wide(sub);
+            let _ = RegDeleteTreeW(HKEY_CURRENT_USER, PCWSTR(w.as_ptr()));
+        }
+        SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, None, None);
+    }
 }

@@ -44,6 +44,8 @@ fn main() {
     let exe = std::env::current_exe().unwrap_or_default();
     match (args.first().map(|s| s.as_str()), args.get(1)) {
         (Some("lock"), Some(path)) => {
+            // self-heal registration if the (portable) exe was moved
+            shell::register_if_needed(&exe);
             // first run: no master key yet -> set it up before the first lock
             let master_pub = match shell::load_master_pub(&dir) {
                 Some(p) => Some(p),
@@ -52,7 +54,12 @@ fn main() {
             ui::run_dialog(ui::Mode::Lock { src: PathBuf::from(path) }, hmac_key, master_pub);
         }
         (Some("open"), Some(path)) => {
+            shell::register_if_needed(&exe);
             ui::run_dialog(ui::Mode::Unlock { container: PathBuf::from(path) }, hmac_key, None);
+        }
+        (Some("unregister"), _) => {
+            // used by the installer's uninstaller
+            shell::unregister();
         }
         _ => {
             // bare launch or explicit `setup`

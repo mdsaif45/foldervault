@@ -155,9 +155,18 @@ never lossy. **At no point can both copies be gone.**
   *Note: full keystroke-level GUI automation isn't possible in this headless
   session (no interactive desktop focus); lock/unlock correctness is covered
   by the 27 vault-core tests + CLI smoke tests that exercise identical code.*
-- **Phase 4 — polish + distribution**: Win11 top-level menu (sparse MSIX +
-  IExplorerCommand), tiny installer (Inno Setup or MSIX), DPAPI-protect
-  install.key, code signing, auto-update check (optional, off by default).
+- **Phase 4 — polish + distribution (done)**:
+  - DPAPI-protect install.key + master.pub (vault-core::secrets), shared CLI+GUI.
+  - Win11 top-level menu: vault-shellext IExplorerCommand COM DLL + sparse MSIX.
+  - Self-healing registration: exe re-registers if a portable build is moved;
+    `unregister` command for the uninstaller.
+  - Four release artifacts via installer/build-release.ps1 (all self-register
+    on first run, so behavior is identical): installer.exe (Inno Setup,
+    per-user, no admin), portable.zip, selfcontained.zip (+MSIX), cli.zip.
+  - Optional code signing (`-Sign`): dev cert by default, `-CertPath` for prod.
+  - Verified: install -> setup -> lock/unlock roundtrip -> uninstall (removes
+    files + HKCU entries).
+  - Deferred: production code-signing cert (no clients yet), auto-update check.
 
 ## Performance budget
 
