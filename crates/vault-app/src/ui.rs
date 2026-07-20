@@ -679,37 +679,83 @@ unsafe fn is_visible(hwnd: HWND) -> bool {
     windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(hwnd).as_bool()
 }
 
-/// Hand-drawn eye icon centered in `rc` (matches the mockup rather than an
-/// MDL2 glyph). Outline almond (a wide ellipse) + filled pupil; `open`=false
-/// adds a diagonal slash for the hidden state.
-unsafe fn draw_eye(app: &App, hdc: HDC, rc: &RECT, color: COLORREF, open: bool) {
+/// Crisp eye icon rendered like an SVG path: an almond drawn from two Bézier
+/// lids + a round pupil, supersampled 4x and StretchBlt-ed down with HALFTONE
+/// so the curves are anti-aliased (GDI alone aliases badly at 16px). `open`=
+/// false adds the slash (hidden state).
+unsafe fn draw_eye(hdc: HDC, rc: &RECT, color: COLORREF, open: bool) {
     use windows::Win32::Graphics::Gdi::{
-        Ellipse, GetStockObject, LineTo, MoveToEx, HOLLOW_BRUSH,
+        CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, GetStockObject, LineTo, MoveToEx,
+        PolyBezier, SetStretchBltMode, StretchBlt, HALFTONE, HOLLOW_BRUSH, SRCCOPY,
     };
-    let cx = (rc.left + rc.right) / 2;
-    let cy = (rc.top + rc.bottom) / 2;
-    let w = s(app, 8); // half-width
-    let h = s(app, 5); // half-height (almond is wider than tall)
-    let pen = CreatePen(PS_SOLID, (s(app, 1)).max(1), color);
-    let hollow = HBRUSH(GetStockObject(HOLLOW_BRUSH).0);
-    let op = SelectObject(hdc, pen);
-    let ob = SelectObject(hdc, hollow);
-    // almond outline
-    let _ = Ellipse(hdc, cx - w, cy - h, cx + w, cy + h);
-    SelectObject(hdc, ob);
-    // filled pupil
-    let pr = s(app, 2).max(2);
-    let pbrush = CreateSolidBrush(color);
-    let ob2 = SelectObject(hdc, pbrush);
-    let _ = Ellipse(hdc, cx - pr, cy - pr, cx + pr, cy + pr);
-    SelectObject(hdc, ob2);
-    let _ = DeleteObject(pbrush);
-    if !open {
-        let _ = MoveToEx(hdc, cx - w - s(app, 1), cy + h, None);
-        let _ = LineTo(hdc, cx + w + s(app, 1), cy - h);
+    use windows::Win32::Foundation::POINT;
+    let bw = rc.right - rc.left;
+    let bh = rc.bottom - rc.top;
+    if bw <= 0 || bh <= 0 {
+        return;
     }
-    SelectObject(hdc, op);
+    const SS: i32 = 4; // supersample factor
+    let (bwx, bhx) = (bw * SS, bh * SS);
+
+    let mem = CreateCompatibleDC(hdc);
+    let bmp = CreateCompatibleBitmap(hdc, bwx, bhx);
+    let old_bmp = SelectObject(mem, bmp);
+    // fill the offscreen with the field colour so downscale blends into it
+    let bg = CreateSolidBrush(FIELD);
+    let full = RECT { left: 0, top: 0, right: bwx, bottom: bhx };
+    FillRect(mem, &full, bg);
+    let _ = DeleteObject(bg);
+
+    let cx = bwx / 2;
+    let cy = bhx / 2;
+    let w = (bw * SS * 42 / 100).max(SS); // half-width ~0.42 of box
+    let h = (bh * SS * 26 / 100).max(SS); // half-height ~0.26 of box
+    let pen = CreatePen(PS_SOLID, (SS as f32 * 1.4) as i32, color);
+    let hollow = HBRUSH(GetStockObject(HOLLOW_BRUSH).0);
+    let op = SelectObject(mem, pen);
+    let ob = SelectObject(mem, hollow);
+
+    // upper lid: bezier from left corner up-and-over to right corner
+    let up = [
+        POINT { x: cx - w, y: cy },
+        POINT { x: cx - w / 2, y: cy - h * 2 },
+        POINT { x: cx + w / 2, y: cy - h * 2 },
+        POINT { x: cx + w, y: cy },
+    ];
+    let _ = PolyBezier(mem, &up);
+    // lower lid: mirror
+    let dn = [
+        POINT { x: cx - w, y: cy },
+        POINT { x: cx - w / 2, y: cy + h * 2 },
+        POINT { x: cx + w / 2, y: cy + h * 2 },
+        POINT { x: cx + w, y: cy },
+    ];
+    let _ = PolyBezier(mem, &dn);
+
+    // pupil (filled)
+    SelectObject(mem, ob);
+    let pr = (bh * SS * 15 / 100).max(SS);
+    let pbrush = CreateSolidBrush(color);
+    let ob2 = SelectObject(mem, pbrush);
+    let _ = windows::Win32::Graphics::Gdi::Ellipse(mem, cx - pr, cy - pr, cx + pr, cy + pr);
+    SelectObject(mem, ob2);
+    let _ = DeleteObject(pbrush);
+
+    if !open {
+        let _ = MoveToEx(mem, cx - w, cy + h + SS, None);
+        let _ = LineTo(mem, cx + w, cy - h - SS);
+    }
+
+    SelectObject(mem, op);
     let _ = DeleteObject(pen);
+
+    // downscale into the target with smoothing
+    SetStretchBltMode(hdc, HALFTONE);
+    let _ = StretchBlt(hdc, rc.left, rc.top, bw, bh, mem, 0, 0, bwx, bhx, SRCCOPY);
+
+    SelectObject(mem, old_bmp);
+    let _ = DeleteObject(bmp);
+    let _ = DeleteDC(mem);
 }
 
 unsafe fn on_drawitem(app: &mut App, dis: &DRAWITEMSTRUCT) {
@@ -758,7 +804,7 @@ unsafe fn on_drawitem(app: &mut App, dis: &DRAWITEMSTRUCT) {
             FillRect(hdc, &rc, bg);
             let _ = DeleteObject(bg);
             let color = if pressed || app.reveal { ACCENT } else { MUTED };
-            draw_eye(app, hdc, &rc, color, app.reveal);
+            draw_eye(hdc, &rc, color, app.reveal);
         }
         ID_LINK => {
             if let Mode::Setup { .. } = app.mode {
