@@ -2,3 +2,6 @@
 Cargo.lock
 *.fvlt
 *.pdb
+
+# icons are generated (installer/make-icons.ps1), keep them tracked
+!assets/*.ico

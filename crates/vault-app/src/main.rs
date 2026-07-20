@@ -1,18 +1,80 @@
 //! FolderVault GUI (windows subsystem — no console flash).
 //!
-//! Invocations (all sub-100 ms cold start, nothing stays resident):
-//!   FolderVault.exe lock  "<folder>"   ← Explorer context-menu verb
-//!   FolderVault.exe open  "<file>"     ← .fvlt double-click association
-//!   FolderVault.exe setup              ← first run / re-register shell entries
+//!   FolderVault.exe lock  "<folder>"   <- Explorer context-menu verb
+//!   FolderVault.exe open  "<file>"     <- .fvlt double-click association
+//!   FolderVault.exe setup              <- register shell entries + master key
 //!
-//! UI: single borderless dark window, DWM rounded corners + Mica backdrop,
-//! custom-drawn (see docs/PLAN.md §UI spec).
+//! Nothing stays resident: the process exists only while a dialog is open.
 
 #![windows_subsystem = "windows"]
 
 mod shell;
 mod ui;
 
+use std::path::PathBuf;
+
+use windows::core::PCWSTR;
+use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+
+use vault_core::journal::Journal;
+
+fn msgbox(text: &str) {
+    let t = shell::wide(text);
+    let c = shell::wide("FolderVault");
+    unsafe {
+        MessageBoxW(None, PCWSTR(t.as_ptr()), PCWSTR(c.as_ptr()), MB_OK | MB_ICONERROR);
+    }
+}
+
 fn main() {
-    // TODO(phase-3): route args → ui::lock_dialog / ui::unlock_dialog / shell::setup.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let dir = shell::data_dir();
+    let hmac_key = match shell::install_key(&dir) {
+        Ok(k) => k,
+        Err(e) => {
+            msgbox(&format!("Cannot access FolderVault data directory:\n{e}"));
+            return;
+        }
+    };
+    // heal any interrupted operation before doing anything new
+    if let Ok(j) = Journal::open(&dir.join("journal")) {
+        let _ = j.recover(&hmac_key);
+    }
+
+    let exe = std::env::current_exe().unwrap_or_default();
+    match (args.first().map(|s| s.as_str()), args.get(1)) {
+        (Some("lock"), Some(path)) => {
+            // first run: no master key yet -> set it up before the first lock
+            let master_pub = match shell::load_master_pub(&dir) {
+                Some(p) => Some(p),
+                None => run_setup(&dir, &exe, hmac_key),
+            };
+            ui::run_dialog(ui::Mode::Lock { src: PathBuf::from(path) }, hmac_key, master_pub);
+        }
+        (Some("open"), Some(path)) => {
+            ui::run_dialog(ui::Mode::Unlock { container: PathBuf::from(path) }, hmac_key, None);
+        }
+        _ => {
+            // bare launch or explicit `setup`
+            run_setup(&dir, &exe, hmac_key);
+        }
+    }
+}
+
+/// Register the shell entries and, if missing, generate + show the master
+/// recovery code. Returns the master public key.
+fn run_setup(dir: &std::path::Path, exe: &std::path::Path, hmac_key: [u8; 32]) -> Option<[u8; 32]> {
+    if let Err(e) = shell::register(exe) {
+        msgbox(&format!("Could not register Explorer integration:\n{e}"));
+    }
+    if let Some(existing) = shell::load_master_pub(dir) {
+        return Some(existing);
+    }
+    let pair = vault_core::recovery::generate();
+    if let Err(e) = shell::save_master_pub(dir, &pair.public) {
+        msgbox(&format!("Could not save the master key:\n{e}"));
+        return None;
+    }
+    ui::run_dialog(ui::Mode::Setup { code: pair.code }, hmac_key, Some(pair.public));
+    Some(pair.public)
 }
