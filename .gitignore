@@ -5,3 +5,6 @@ Cargo.lock
 
 # icons are generated (installer/make-icons.ps1), keep them tracked
 !assets/*.ico
+
+# stray test data
+test-folder/
