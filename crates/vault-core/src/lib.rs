@@ -8,6 +8,7 @@ pub mod format;
 pub mod journal;
 pub mod lockout;
 pub mod recovery;
+pub mod secrets;
 pub mod walk;
 
 use std::path::PathBuf;

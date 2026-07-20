@@ -1,6 +1,6 @@
 //! Explorer integration (HKCU registry, no admin) + per-install data files.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use windows::core::PCWSTR;
 use windows::Win32::System::Registry::{
@@ -13,42 +13,11 @@ pub fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-pub fn data_dir() -> PathBuf {
-    std::env::var_os("FVLT_KEY_DIR")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("LOCALAPPDATA").map(|d| Path::new(&d).join("FolderVault")))
-        .unwrap_or_else(|| PathBuf::from(".foldervault"))
-}
-
-/// Per-install HMAC key — same file and format as the CLI so both front-ends
-/// agree on lockout-state authenticity.
-pub fn install_key(base: &Path) -> std::io::Result<[u8; 32]> {
-    let path = base.join("install.key");
-    match std::fs::read(&path) {
-        Ok(bytes) if bytes.len() == 32 => {
-            let mut k = [0u8; 32];
-            k.copy_from_slice(&bytes);
-            Ok(k)
-        }
-        _ => {
-            std::fs::create_dir_all(base)?;
-            let mut k = [0u8; 32];
-            vault_core::crypto::random_bytes(&mut k);
-            std::fs::write(&path, k)?;
-            Ok(k)
-        }
-    }
-}
-
-pub fn load_master_pub(base: &Path) -> Option<[u8; 32]> {
-    let bytes = std::fs::read(base.join("master.pub")).ok()?;
-    bytes.try_into().ok()
-}
-
-pub fn save_master_pub(base: &Path, public: &[u8; 32]) -> std::io::Result<()> {
-    std::fs::create_dir_all(base)?;
-    std::fs::write(base.join("master.pub"), public)
-}
+// Key/secret handling lives in vault-core::secrets (DPAPI-protected on
+// Windows) so the CLI and GUI share one code path. Re-export for convenience.
+pub use vault_core::secrets::{
+    data_dir, load_master_pub, load_or_create_install_key as install_key, save_master_pub,
+};
 
 fn set_value(root: HKEY, subkey: &str, value_name: Option<&str>, data: &str) -> windows::core::Result<()> {
     unsafe {

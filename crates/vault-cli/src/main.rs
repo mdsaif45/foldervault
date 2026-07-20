@@ -14,13 +14,14 @@
 //! Exit codes: 0 ok, 2 usage, 3 wrong password, 4 locked out, 5 tampered, 1 other.
 
 use std::io::{BufRead, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use vault_core::format::{
     inspect, lock_folder, unlock_container, verify_structure, Credential, LockOptions,
 };
 use vault_core::journal::Journal;
+use vault_core::secrets::{self, data_dir, load_or_create_install_key as install_key};
 use vault_core::recovery;
 use vault_core::VaultError;
 
@@ -55,13 +56,12 @@ fn run(args: &[String]) -> i32 {
 
     match cmd.as_str() {
         "master-init" => {
-            let pub_path = dir.join("master.pub");
-            if pub_path.exists() && !flag("--force") {
+            if secrets::load_master_pub(&dir).is_some() && !flag("--force") {
                 return fail("a master key already exists (use --force to replace it; \
                              containers sealed to the old key keep working only with the OLD code)");
             }
             let pair = recovery::generate();
-            if let Err(e) = std::fs::write(&pub_path, pair.public) {
+            if let Err(e) = secrets::save_master_pub(&dir, &pair.public) {
                 return fail(&format!("cannot save master public key: {e}"));
             }
             println!("Master recovery code (shown ONCE — write it down or store it in a password manager):");
@@ -86,12 +86,7 @@ fn run(args: &[String]) -> i32 {
                 secure_delete: flag("--secure-delete"),
                 ..Default::default()
             };
-            let pub_path = dir.join("master.pub");
-            if let Ok(bytes) = std::fs::read(&pub_path) {
-                if bytes.len() == 32 {
-                    opts.master_pub = Some(bytes.try_into().unwrap());
-                }
-            }
+            opts.master_pub = secrets::load_master_pub(&dir);
             if opts.master_pub.is_none() {
                 eprintln!("note: no master key enrolled (run `fvlt master-init`) — \
                            this container will be password-only");
@@ -247,31 +242,4 @@ fn now_unix() -> u64 {
 
 fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
-}
-
-fn data_dir() -> PathBuf {
-    std::env::var_os("FVLT_KEY_DIR")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("LOCALAPPDATA").map(|d| Path::new(&d).join("FolderVault")))
-        .unwrap_or_else(|| PathBuf::from(".foldervault"))
-}
-
-/// Per-install HMAC key at %LOCALAPPDATA%\FolderVault\install.key.
-/// (The GUI app will DPAPI-protect this in phase 3; the CLI keeps it plain.)
-fn install_key(base: &Path) -> std::io::Result<[u8; 32]> {
-    let path = base.join("install.key");
-    match std::fs::read(&path) {
-        Ok(bytes) if bytes.len() == 32 => {
-            let mut k = [0u8; 32];
-            k.copy_from_slice(&bytes);
-            Ok(k)
-        }
-        _ => {
-            std::fs::create_dir_all(base)?;
-            let mut k = [0u8; 32];
-            vault_core::crypto::random_bytes(&mut k);
-            std::fs::write(&path, k)?;
-            Ok(k)
-        }
-    }
 }
