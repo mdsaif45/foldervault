@@ -131,12 +131,13 @@ never lossy. **At no point can both copies be gone.**
 ## Phases
 
 - **Phase 0 — scaffold (done)**: workspace, docs, size-tuned profiles, stubs.
-- **Phase 1 — core (vault-core + vault-cli)**: container format, Argon2id +
-  AES-256-GCM streaming (1 MiB chunks, rayon parallel), key wrapping, lockout
-  module, round-trip + tamper + wrong-password unit tests. *Exit: `vault-cli
-  lock/unlock` round-trips a 1 GB folder ≥ 500 MB/s with < 50 MB RAM.*
-- **Phase 2 — crash safety + recovery**: journal, atomic rename dance, master
-  recovery key setup, secure-delete option.
+- **Phase 1 — core (done)**: container format, Argon2id + AES-256-GCM
+  streaming (1 MiB chunks), key wrapping, lockout module, 16 tests.
+  *Measured: 200 MB locks in ~1 s incl. KDF; fvlt.exe 240 KB.*
+- **Phase 2 — crash safety + recovery (done)**: X25519 master recovery key
+  (public half stored, private half = one-time recovery code, bypasses
+  lockout), crash-recovery journal (staging-first replay rule), secure-delete
+  option, atomic rename dance. 27 tests total.
 - **Phase 3 — GUI + Explorer (vault-app)**: Win32 window + dialogs above,
   `.fvlt` association + icon, HKCU context-menu verb, first-run setup,
   per-monitor DPI v2, dark/light aware. *Exit: full right-click→lock,

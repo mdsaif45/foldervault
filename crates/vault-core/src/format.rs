@@ -12,13 +12,15 @@ use crate::crypto::{
     derive_kek, unwrap_key, wrap_key, ChunkCipher, KdfParams, SecretKey, MANIFEST_SEQ, NONCE_LEN,
     TAG_LEN, WRAPPED_KEY_LEN,
 };
+use crate::journal::{Journal, OpKind, Record};
 use crate::lockout::{LockoutState, MAX_ATTEMPTS};
+use crate::recovery::{is_enrolled, open_dk, seal_dk, MASTER_WRAP_LEN};
 use crate::walk::{self, Entry};
 use crate::{Result, VaultError, CHUNK_SIZE, MAGIC, VERSION};
 
 type HmacSha256 = Hmac<Sha256>;
 
-pub const HEADER_LEN: usize = 236;
+pub const HEADER_LEN: usize = 268;
 const HMAC_OFFSET: usize = HEADER_LEN - 32;
 /// Upper bound for the encrypted manifest frame (~1M entries).
 const MAX_MANIFEST_LEN: usize = 256 * 1024 * 1024;
@@ -28,8 +30,8 @@ pub struct Header {
     pub salt: [u8; 16],
     pub kdf: KdfParams,
     pub wrapped_dk_pw: [u8; WRAPPED_KEY_LEN],
-    /// All zeroes = no master key enrolled (phase 2).
-    pub wrapped_dk_mk: [u8; WRAPPED_KEY_LEN],
+    /// X25519-sealed data key for master recovery; all-zero = not enrolled.
+    pub wrapped_dk_mk: [u8; MASTER_WRAP_LEN],
     pub lockout: LockoutState,
     pub entry_count: u64,
     /// Total plaintext bytes (for progress reporting).
@@ -51,12 +53,12 @@ impl Header {
         b[44..48].copy_from_slice(&self.kdf.t_cost.to_le_bytes());
         b[48..52].copy_from_slice(&self.kdf.lanes.to_le_bytes());
         b[52..112].copy_from_slice(&self.wrapped_dk_pw);
-        b[112..172].copy_from_slice(&self.wrapped_dk_mk);
-        b[172..176].copy_from_slice(&self.lockout.fail_count.to_le_bytes());
-        // b[176..180] reserved, zero
-        b[180..188].copy_from_slice(&self.lockout.locked_until.to_le_bytes());
-        b[188..196].copy_from_slice(&self.entry_count.to_le_bytes());
-        b[196..204].copy_from_slice(&self.payload_len.to_le_bytes());
+        b[112..204].copy_from_slice(&self.wrapped_dk_mk);
+        b[204..208].copy_from_slice(&self.lockout.fail_count.to_le_bytes());
+        // b[208..212] reserved, zero
+        b[212..220].copy_from_slice(&self.lockout.locked_until.to_le_bytes());
+        b[220..228].copy_from_slice(&self.entry_count.to_le_bytes());
+        b[228..236].copy_from_slice(&self.payload_len.to_le_bytes());
         let mut mac = HmacSha256::new_from_slice(hmac_key).expect("hmac key");
         mac.update(&b[..HMAC_OFFSET]);
         b[HMAC_OFFSET..].copy_from_slice(&mac.finalize().into_bytes());
@@ -83,13 +85,13 @@ impl Header {
                 lanes: u32::from_le_bytes(b[48..52].try_into().unwrap()),
             },
             wrapped_dk_pw: b[52..112].try_into().unwrap(),
-            wrapped_dk_mk: b[112..172].try_into().unwrap(),
+            wrapped_dk_mk: b[112..204].try_into().unwrap(),
             lockout: LockoutState {
-                fail_count: u32::from_le_bytes(b[172..176].try_into().unwrap()),
-                locked_until: u64::from_le_bytes(b[180..188].try_into().unwrap()),
+                fail_count: u32::from_le_bytes(b[204..208].try_into().unwrap()),
+                locked_until: u64::from_le_bytes(b[212..220].try_into().unwrap()),
             },
-            entry_count: u64::from_le_bytes(b[188..196].try_into().unwrap()),
-            payload_len: u64::from_le_bytes(b[196..204].try_into().unwrap()),
+            entry_count: u64::from_le_bytes(b[220..228].try_into().unwrap()),
+            payload_len: u64::from_le_bytes(b[228..236].try_into().unwrap()),
             hmac_ok,
         })
     }
@@ -136,6 +138,20 @@ fn read_frame(r: &mut impl Read, max_len: usize) -> Result<([u8; NONCE_LEN], Vec
 #[derive(Default)]
 pub struct LockOptions {
     pub kdf: Option<KdfParams>,
+    /// Master public key: when set, the data key is also sealed to it so the
+    /// recovery code can unlock this container.
+    pub master_pub: Option<[u8; 32]>,
+    /// Best-effort overwrite of source file contents before deletion.
+    /// (SSD wear-leveling limits what this can promise — see THREAT-MODEL.md.)
+    pub secure_delete: bool,
+}
+
+/// How the caller is trying to open a container.
+pub enum Credential<'a> {
+    Password(&'a [u8]),
+    /// Master recovery code (`XXXX-XXXX-...`). Bypasses the lockout — the
+    /// code has 256 bits of entropy, brute force is not a concern.
+    MasterCode(&'a str),
 }
 
 /// Encrypt `src` folder into a sibling `<name>.fvlt` container, then delete
@@ -146,6 +162,7 @@ pub fn lock_folder(
     password: &[u8],
     hmac_key: &[u8; 32],
     opts: &LockOptions,
+    journal: Option<&Journal>,
     progress: &mut dyn FnMut(u64, u64),
 ) -> Result<PathBuf> {
     let name = src
@@ -161,16 +178,68 @@ pub fn lock_folder(
         return Err(VaultError::Exists(dest));
     }
     let tmp = parent.join(format!("{name}.fvlt.tmp"));
+    if tmp.exists() {
+        fs::remove_file(&tmp)?; // stale leftover from an interrupted attempt
+    }
 
     let scan = walk::scan(src)?;
-    let result = write_container(src, &tmp, &scan.entries, scan.total_bytes, password, hmac_key, opts, progress);
-    if let Err(e) = result {
-        let _ = fs::remove_file(&tmp);
-        return Err(e);
-    }
+    let uuid = match write_container(
+        src, &tmp, &scan.entries, scan.total_bytes, password, hmac_key, opts, progress,
+    ) {
+        Ok(uuid) => uuid,
+        Err(e) => {
+            let _ = fs::remove_file(&tmp);
+            return Err(e);
+        }
+    };
+
+    let record = journal
+        .map(|j| {
+            let rec = Record {
+                op: OpKind::Lock,
+                folder: src.to_string_lossy().into_owned(),
+                container: dest.to_string_lossy().into_owned(),
+                staging: tmp.to_string_lossy().into_owned(),
+            };
+            j.begin(&uuid, &rec).map(|p| (j, p))
+        })
+        .transpose()?;
+
     fs::rename(&tmp, &dest)?;
+    if opts.secure_delete {
+        wipe_tree(src, &scan.entries);
+    }
     fs::remove_dir_all(src)?;
+    if let Some((j, p)) = record {
+        j.complete(&p);
+    }
     Ok(dest)
+}
+
+/// Best-effort: overwrite file contents with zeros + fsync before deletion.
+fn wipe_tree(src: &Path, entries: &[Entry]) {
+    let zeros = vec![0u8; CHUNK_SIZE];
+    for e in entries.iter().filter(|e| !e.is_dir && e.size > 0) {
+        let Ok(path) = safe_join(src, &e.rel_path) else { continue };
+        // clear read-only so the overwrite (and later delete) can proceed
+        if let Ok(meta) = fs::metadata(&path) {
+            let mut perms = meta.permissions();
+            if perms.readonly() {
+                perms.set_readonly(false);
+                let _ = fs::set_permissions(&path, perms);
+            }
+        }
+        let Ok(mut f) = OpenOptions::new().write(true).open(&path) else { continue };
+        let mut remaining = e.size;
+        while remaining > 0 {
+            let n = remaining.min(CHUNK_SIZE as u64) as usize;
+            if f.write_all(&zeros[..n]).is_err() {
+                break;
+            }
+            remaining -= n as u64;
+        }
+        let _ = f.sync_all();
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -183,7 +252,7 @@ fn write_container(
     hmac_key: &[u8; 32],
     opts: &LockOptions,
     progress: &mut dyn FnMut(u64, u64),
-) -> Result<()> {
+) -> Result<[u8; 16]> {
     use aes_gcm::aead::OsRng;
     use rand_core::RngCore;
 
@@ -200,7 +269,10 @@ fn write_container(
         salt,
         kdf,
         wrapped_dk_pw: wrap_key(&kek, &dk),
-        wrapped_dk_mk: [0u8; WRAPPED_KEY_LEN],
+        wrapped_dk_mk: opts
+            .master_pub
+            .map(|p| seal_dk(&p, &dk))
+            .unwrap_or([0u8; MASTER_WRAP_LEN]),
         lockout: LockoutState::default(),
         entry_count: entries.len() as u64,
         payload_len: total_bytes,
@@ -239,18 +311,20 @@ fn write_container(
     }
     w.flush()?;
     w.get_ref().sync_all()?;
-    Ok(())
+    Ok(uuid)
 }
 
 /// Decrypt a container back into its folder, then delete the container.
-/// Wrong password mutates the lockout state in the container header before
-/// returning. Extraction goes to `<name>.__restoring` and is renamed into
-/// place only when complete — a failure never leaves a half-restored folder.
+/// A wrong password mutates the lockout state in the container header before
+/// returning; the master code path bypasses the lockout entirely. Extraction
+/// goes to `<name>.__restoring` and is renamed into place only when complete
+/// — a failure never leaves a half-restored folder.
 pub fn unlock_container(
     container: &Path,
-    password: &[u8],
+    credential: Credential<'_>,
     hmac_key: &[u8; 32],
     now_unix: u64,
+    journal: Option<&Journal>,
     progress: &mut dyn FnMut(u64, u64),
 ) -> Result<PathBuf> {
     let mut f = OpenOptions::new().read(true).write(true).open(container)?;
@@ -263,15 +337,28 @@ pub fn unlock_container(
     if !header.hmac_ok && header.lockout.fail_count < MAX_ATTEMPTS - 1 {
         header.lockout.fail_count = MAX_ATTEMPTS - 1;
     }
-    header.lockout.check(now_unix)?;
 
-    let kek = derive_kek(password, &header.salt, &header.kdf)?;
-    let dk = match unwrap_key(&kek, &header.wrapped_dk_pw) {
-        Some(dk) => dk,
-        None => {
-            let err = header.lockout.record_failure(now_unix);
-            rewrite_header(&mut f, &header, hmac_key)?;
-            return Err(err);
+    let dk = match credential {
+        Credential::Password(password) => {
+            header.lockout.check(now_unix)?;
+            let kek = derive_kek(password, &header.salt, &header.kdf)?;
+            match unwrap_key(&kek, &header.wrapped_dk_pw) {
+                Some(dk) => dk,
+                None => {
+                    let err = header.lockout.record_failure(now_unix);
+                    rewrite_header(&mut f, &header, hmac_key)?;
+                    return Err(err);
+                }
+            }
+        }
+        Credential::MasterCode(code) => {
+            if !is_enrolled(&header.wrapped_dk_mk) {
+                return Err(VaultError::Other(
+                    "no master key is enrolled in this container".into(),
+                ));
+            }
+            open_dk(code, &header.wrapped_dk_mk)
+                .ok_or_else(|| VaultError::Other("invalid recovery code".into()))?
         }
     };
     if header.lockout != LockoutState::default() || !header.hmac_ok {
@@ -314,8 +401,24 @@ pub fn unlock_container(
         return Err(e);
     }
     drop(r); // close the container before deleting it
+
+    let record = journal
+        .map(|j| {
+            let rec = Record {
+                op: OpKind::Unlock,
+                folder: dest.to_string_lossy().into_owned(),
+                container: container.to_string_lossy().into_owned(),
+                staging: tmpdir.to_string_lossy().into_owned(),
+            };
+            j.begin(&header.uuid, &rec).map(|p| (j, p))
+        })
+        .transpose()?;
+
     fs::rename(&tmpdir, &dest)?;
     fs::remove_file(container)?;
+    if let Some((j, p)) = record {
+        j.complete(&p);
+    }
     Ok(dest)
 }
 
@@ -435,7 +538,7 @@ mod tests {
             salt: [2; 16],
             kdf: KdfParams::default(),
             wrapped_dk_pw: [3; WRAPPED_KEY_LEN],
-            wrapped_dk_mk: [0; WRAPPED_KEY_LEN],
+            wrapped_dk_mk: [4; MASTER_WRAP_LEN],
             lockout: LockoutState { fail_count: 2, locked_until: 42 },
             entry_count: 7,
             payload_len: 1234,
@@ -445,6 +548,7 @@ mod tests {
         let back = Header::from_bytes(&bytes, &key).unwrap();
         assert!(back.hmac_ok);
         assert_eq!(back.uuid, h.uuid);
+        assert_eq!(back.wrapped_dk_mk, h.wrapped_dk_mk);
         assert_eq!(back.lockout, h.lockout);
         assert_eq!(back.entry_count, 7);
         // wrong hmac key -> parses but flagged foreign

@@ -16,6 +16,9 @@
 - **Malware running as you while the folder is unlocked**: once extracted,
   files are plaintext on disk.
 - **Forgotten password + lost master key**: unrecoverable by design. No backdoor.
+  (The master key is X25519: only the *public* half lives on disk — it can seal
+  data keys but never open them. The recovery code is shown once and never
+  stored; someone stealing the machine cannot use master recovery.)
 - **Forensic recovery of pre-lock plaintext**: deleting originals doesn't wipe
   disk sectors (SSDs make secure wipe unreliable anyway). `--secure-delete`
   does a best-effort overwrite; the honest fix is locking data early in its life.

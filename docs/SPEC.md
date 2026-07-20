@@ -4,7 +4,7 @@ All integers little-endian. One container = one locked folder.
 
 ```
 ┌──────────────────────────────────────────────────────────┐
-│ HEADER — 236 bytes (plaintext, HMAC-authenticated)       │
+│ HEADER — 268 bytes (plaintext, HMAC-authenticated)       │
 │  magic          4 B   "FVLT"                             │
 │  version        4 B   u32 = 1                            │
 │  container_uuid 16 B  random, stable for container life  │
@@ -13,14 +13,16 @@ All integers little-endian. One container = one locked folder.
 │                       lanes u32   (default 65536, 3, 4)  │
 │  wrapped_dk_pw  60 B  data key wrapped by password KEK   │
 │                       (12 B nonce + 32 B ct + 16 B tag)  │
-│  wrapped_dk_mk  60 B  data key wrapped by master KEK     │
-│                       (all-zero = no master key, phase 2)│
+│  wrapped_dk_mk  92 B  X25519-sealed data key for master  │
+│                       recovery: ephemeral pubkey (32) +  │
+│                       AES-GCM wrap (60).                 │
+│                       all-zero = no master key enrolled  │
 │  lockout        16 B  fail_count u32 | reserved u32 |    │
 │                       locked_until_unix u64              │
 │  entry_count    8 B   u64                                │
 │  payload_len    8 B   u64  total PLAINTEXT bytes         │
 │                       (drives progress bars)             │
-│  header_hmac    32 B  HMAC-SHA256 over bytes 0..204,     │
+│  header_hmac    32 B  HMAC-SHA256 over bytes 0..236,     │
 │                       keyed by install key (see below)   │
 ├──────────────────────────────────────────────────────────┤
 │ MANIFEST — one frame (see framing below), seq = u64::MAX │
@@ -42,14 +44,24 @@ All integers little-endian. One container = one locked folder.
 
 ```
 password ──Argon2id(salt,params)──► KEK_pw ──unwrap──► DK (random 256-bit)
-master recovery key (first run) ──HKDF──► KEK_mk ──unwrap──► DK
 DK ──AES-256-GCM──► manifest + chunks
-install.key (%LOCALAPPDATA%, DPAPI) ──► HMAC key for header/lockout state
+install.key (%LOCALAPPDATA%, DPAPI in GUI) ──► HMAC key for header/lockout
+
+Master recovery (X25519 sealed box):
+  setup:  keypair generated once. master.pub stored on disk (can only SEAL);
+          the private key is shown ONCE as the recovery code, never stored.
+  code =  Crockford-base32: 52 data chars + 4 checksum chars, 14 groups of 4
+          (I/L→1, O→0 mapping; case/dash/space insensitive on entry)
+  lock:   eph = random X25519 key; shared = ECDH(eph, master.pub)
+          KEK_mk = HMAC-SHA256(key="fvlt-master-kek-v1", shared)
+          wrapped_dk_mk = eph.pub (32) ‖ AES-GCM-wrap(KEK_mk, DK) (60)
+  rescue: code → private key → ECDH(private, eph.pub) → KEK_mk → DK.
+          Bypasses lockout (256-bit code: brute force is not a concern)
+          and resets it on success.
 ```
 
 - `DK` is generated fresh per lock operation (`OsRng`), zeroized after use
   (`zeroize` crate).
-- Password change / master unlock only re-wraps `DK` — no payload rewrite.
 - Nonces: 96-bit random per chunk; chunk sequence number in AAD prevents
   reorder attacks despite random nonces.
 
@@ -76,10 +88,23 @@ Tamper / foreign check on every open:
 
 ```
 fvlt lock   <folder> [--password-stdin] [--secure-delete]
-fvlt unlock <file>   [--password-stdin] [--master-stdin]
+fvlt unlock <file>   [--password-stdin | --master-stdin]
 fvlt inspect <file>          # header + lockout state, no secrets
-fvlt verify <file>           # full integrity walk without extracting
+fvlt verify <file>           # structural integrity walk, no credentials
+fvlt master-init [--force]   # generate recovery code (printed once)
+fvlt recover                 # replay crash-recovery journal (also automatic)
 ```
+
+## Crash-recovery journal
+
+Both operations follow *stage → rename → delete the other copy*; the only
+dangerous window is between rename and delete (both copies on disk, never
+zero). A journal record `{op, folder, container, staging}` is fsynced to
+`%LOCALAPPDATA%\FolderVault\journal\<uuid>.jrec` just before the rename and
+removed after the delete. Replay rule: **if staging still exists the rename
+never happened** — remove staging only, the pre-rename copy stays the source
+of truth; if staging is gone, the rename committed — finish the delete (for
+lock, only after `verify_structure` passes on the container).
 
 ## Test matrix (Phase 1 exit criteria)
 
