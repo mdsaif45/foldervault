@@ -427,9 +427,11 @@ unsafe fn on_create(app: &mut App) {
 
     // All fields reserve the same right gutter so their edges (and the rounded
     // borders drawn behind them) line up, whether or not an eye toggle sits in
-    // the gutter. Text starts sc(14) in from the field's left edge.
+    // the gutter. Text starts sc(14) in from the field's left edge. The gutter
+    // is wide enough that the eye button sits entirely to the RIGHT of the EDIT
+    // control (otherwise the focused EDIT paints over the eye's left half).
     let mk_edit = move |y: i32, h: i32, style: u32, id: isize| -> HWND {
-        let right_pad = sc(44);
+        let right_pad = sc(52);
         CreateWindowExW(
             WINDOW_EX_STYLE(0),
             w!("EDIT"),
@@ -467,16 +469,15 @@ unsafe fn on_create(app: &mut App) {
             app.edit2 = mk_edit(sc(122), sc(38), (ES_PASSWORD | ES_AUTOHSCROLL) as u32, ID_EDIT2);
             set_cue(app.edit, "Password");
             set_cue(app.edit2, "Confirm password");
-            // eye toggle in the first field's right gutter (square, fits field),
-            // inset ~10px from the rounded border so it isn't clipped
-            mk_button(cw - sc(24) - sc(38), sc(78) + sc(4), sc(30), sc(30), ID_EYE);
+            // eye toggle in the gutter, fully right of the EDIT (ends at cw-52)
+            mk_button(cw - sc(24) - sc(26), sc(78) + sc(7), sc(24), sc(24), ID_EYE);
             mk_button(cw - sc(24 + 104), sc(252 - 22 - 36), sc(104), sc(36), ID_PRIMARY);
         }
         Mode::Unlock { .. } => {
             app.edit = mk_edit(sc(78), sc(38), (ES_PASSWORD | ES_AUTOHSCROLL) as u32, ID_EDIT);
             set_cue(app.edit, "Password");
-            // eye toggle in the field's right gutter, inset from the border
-            mk_button(cw - sc(24) - sc(38), sc(78) + sc(4), sc(30), sc(30), ID_EYE);
+            // eye toggle in the gutter, fully right of the EDIT
+            mk_button(cw - sc(24) - sc(26), sc(78) + sc(7), sc(24), sc(24), ID_EYE);
             mk_button(cw - sc(24 + 104), sc(214 - 22 - 36), sc(104), sc(36), ID_PRIMARY);
             // "Use recovery code" underlined text link (left-aligned, drawn as link)
             mk_button(sc(24), sc(214 - 22 - 32), sc(160), sc(28), ID_LINK);
@@ -711,9 +712,9 @@ unsafe fn draw_eye(hdc: HDC, rc: &RECT, color: COLORREF, open: bool) {
 
     let cx = bwx / 2;
     let cy = bhx / 2;
-    let w = (bw * SS * 42 / 100).max(SS); // half-width ~0.42 of box
-    let h = (bh * SS * 26 / 100).max(SS); // half-height ~0.26 of box
-    let pen = CreatePen(PS_SOLID, (SS as f32 * 1.4) as i32, color);
+    let w = (bw * SS * 36 / 100).max(SS); // half-width ~0.36 of box
+    let h = (bh * SS * 22 / 100).max(SS); // half-height ~0.22 of box
+    let pen = CreatePen(PS_SOLID, (SS as f32 * 1.3) as i32, color);
     let hollow = HBRUSH(GetStockObject(HOLLOW_BRUSH).0);
     let op = SelectObject(mem, pen);
     let ob = SelectObject(mem, hollow);
@@ -737,7 +738,7 @@ unsafe fn draw_eye(hdc: HDC, rc: &RECT, color: COLORREF, open: bool) {
 
     // pupil (filled)
     SelectObject(mem, ob);
-    let pr = (bh * SS * 15 / 100).max(SS);
+    let pr = (bh * SS * 11 / 100).max(SS);
     let pbrush = CreateSolidBrush(color);
     let ob2 = SelectObject(mem, pbrush);
     let _ = windows::Win32::Graphics::Gdi::Ellipse(mem, cx - pr, cy - pr, cx + pr, cy + pr);
