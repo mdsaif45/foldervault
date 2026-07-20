@@ -22,7 +22,7 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::DRAWITEMSTRUCT;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
-use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, SetFocus};
+use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, SetActiveWindow, SetFocus};
 use windows::Win32::UI::Shell::{SHChangeNotify, SHCNE_UPDATEDIR, SHCNF_PATHW};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect,
@@ -32,8 +32,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, ES_AUTOHSCROLL, ES_MULTILINE, ES_PASSWORD,
     ES_READONLY, GWLP_USERDATA, HMENU, HWND_TOP, IDC_ARROW, MSG, SWP_NOSIZE,
     SWP_NOZORDER, SW_HIDE, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_COMMAND, WM_CREATE,
+    SetForegroundWindow,
     WM_CTLCOLOREDIT, WM_DESTROY, WM_DRAWITEM, WM_LBUTTONDOWN, WM_NCHITTEST, WM_PAINT,
-    WM_SETFONT, WM_TIMER, WNDCLASSEXW, WS_CHILD, WS_POPUP, WS_TABSTOP, WS_VISIBLE,
+    WM_SETFOCUS, WM_SETFONT, WM_TIMER, WNDCLASSEXW, WS_CHILD, WS_EX_APPWINDOW,
+    WS_EX_CONTROLPARENT, WS_POPUP, WS_TABSTOP, WS_VISIBLE,
 };
 
 use vault_core::format::{lock_folder, unlock_container, Credential, LockOptions};
@@ -216,11 +218,15 @@ pub fn run_dialog(mode: Mode, hmac_key: [u8; 32], master_pub: Option<[u8; 32]>) 
         let mw = mi.rcWork.right - mi.rcWork.left;
         let mh = mi.rcWork.bottom - mi.rcWork.top;
 
+        // WS_EX_CONTROLPARENT: lets IsDialogMessageW / Tab recurse into the
+        // child EDIT controls. WS_EX_APPWINDOW: show a taskbar button so the
+        // window can be foreground-activated. WS_POPUPWINDOW gives it a
+        // border/activatable frame without a caption.
         let hwnd = match CreateWindowExW(
-            WINDOW_EX_STYLE(0x00000008 | 0x08000000), // TOPMOST off; actually: plain
+            WS_EX_CONTROLPARENT | WS_EX_APPWINDOW,
             class,
             w!("FolderVault"),
-            WS_POPUP,
+            WS_POPUP | WS_VISIBLE,
             mi.rcWork.left + (mw - w_du) / 2,
             mi.rcWork.top + (mh - h_du) / 2,
             w_du,
@@ -238,6 +244,8 @@ pub fn run_dialog(mode: Mode, hmac_key: [u8; 32], master_pub: Option<[u8; 32]>) 
         };
 
         let _ = ShowWindow(hwnd, SW_SHOW);
+        let _ = SetForegroundWindow(hwnd);
+        let _ = SetActiveWindow(hwnd);
         let _ = SetFocus((*app_ptr).edit);
 
         let mut msg = MSG::default();
@@ -298,6 +306,16 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 }
                 ID_LINK => on_toggle_master(app),
                 _ => {}
+            }
+            LRESULT(0)
+        }
+        WM_SETFOCUS => {
+            // focus the (enabled) input when the window itself gets focus
+            if !matches!(app.phase, Phase::Busy) {
+                let target = app.edit;
+                if !target.is_invalid() {
+                    let _ = SetFocus(target);
+                }
             }
             LRESULT(0)
         }
