@@ -20,6 +20,7 @@ thiserror.workspace = true
 windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_Security_Cryptography",
+    "Win32_UI_Shell",
 ] }
 
 [dev-dependencies]

@@ -13,6 +13,23 @@
 
 - **Deletion / ransom**: anyone with file access can delete `Photos.fvlt`.
   Encryption protects secrecy, not availability. Backups are the answer.
+
+  FolderVault adds two *friction* layers, not guarantees:
+  - the locked `.fvlt` is marked **read-only**, so Explorer shows a
+    delete-confirmation prompt (stops a careless single click, not a
+    determined delete);
+  - deletions FolderVault performs itself (the original folder on lock, the
+    container on unlock) go to the **Recycle Bin**, so an accidental
+    lock/unlock is recoverable.
+
+  Neither can truly *prevent* deletion: the file is yours on your disk, so
+  you (or malware running as you, or another OS) can always clear the
+  read-only bit and delete it. A "password required to delete" feature is on
+  the roadmap, but be clear-eyed that it can only ever be another
+  confirmation prompt from *our* app — the shell's own Delete, `del` from a
+  prompt, or a live USB bypass it entirely. The only real protection against
+  losing data is a backup / second encrypted copy somewhere the attacker
+  can't reach.
 - **Malware running as you while the folder is unlocked**: once extracted,
   files are plaintext on disk.
 - **Forgotten password + lost master key**: unrecoverable by design. No backdoor.

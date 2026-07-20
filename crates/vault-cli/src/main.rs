@@ -84,6 +84,8 @@ fn run(args: &[String]) -> i32 {
             };
             let mut opts = LockOptions {
                 secure_delete: flag("--secure-delete"),
+                recycle_original: flag("--recycle"),
+                readonly_container: flag("--readonly"),
                 ..Default::default()
             };
             opts.master_pub = secrets::load_master_pub(&dir);
@@ -175,7 +177,7 @@ fn run(args: &[String]) -> i32 {
 }
 
 fn usage() -> i32 {
-    eprintln!("usage: fvlt lock <folder> [--password-stdin] [--secure-delete]");
+    eprintln!("usage: fvlt lock <folder> [--password-stdin] [--secure-delete] [--recycle] [--readonly]");
     eprintln!("       fvlt unlock <file> [--password-stdin | --master-stdin]");
     eprintln!("       fvlt inspect|verify <file>");
     eprintln!("       fvlt master-init [--force] | recover");

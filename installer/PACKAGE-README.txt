@@ -20,6 +20,10 @@ DAILY USE
   * Unlock: double-click the .fvlt file -> enter the password.
   * 3 wrong passwords locks that folder for 24 hours (the recovery code still
     works during a lockout).
+  * Locked .fvlt files are marked read-only (Explorer confirms before delete),
+    and folders FolderVault removes go to the Recycle Bin, so mistakes are
+    recoverable. This is friction, not a guarantee -- back up anything you
+    can't afford to lose (encryption protects secrecy, not against deletion).
 
 PORTABLE NOTE
 -------------

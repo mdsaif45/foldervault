@@ -18,7 +18,6 @@ use windows::Win32::Graphics::Gdi::{
     SetBkColor, SetBkMode, SetTextColor, HBRUSH, HDC, HFONT, MONITORINFO,
     MONITOR_DEFAULTTONEAREST, PAINTSTRUCT, PS_SOLID, TRANSPARENT,
     DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, FW_NORMAL,
-    FW_SEMIBOLD,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::DRAWITEMSTRUCT;
@@ -36,7 +35,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SetForegroundWindow,
     WM_CTLCOLOREDIT, WM_DESTROY, WM_DRAWITEM, WM_LBUTTONDOWN, WM_NCHITTEST, WM_PAINT,
     WM_SETFOCUS, WM_SETFONT, WM_TIMER, WNDCLASSEXW, WS_CHILD, WS_EX_APPWINDOW,
-    WS_EX_CONTROLPARENT, WS_POPUP, WS_TABSTOP, WS_VISIBLE,
+    WS_EX_CONTROLPARENT, WS_EX_TOPMOST, WS_POPUP, WS_TABSTOP, WS_VISIBLE,
 };
 
 use vault_core::format::{lock_folder, unlock_container, Credential, LockOptions};
@@ -126,8 +125,8 @@ struct Fonts {
     small: HFONT,
     code: HFONT,
     glyph: HFONT,
-    glyph_sm: HFONT, // smaller MDL2 for the eye toggle
-    link: HFONT,     // underlined small for text links
+    button: HFONT, // primary-button label (medium weight)
+    link: HFONT,   // underlined small for text links
 }
 
 fn s(app: &App, v: i32) -> i32 {
@@ -201,7 +200,7 @@ pub fn run_dialog(mode: Mode, hmac_key: [u8; 32], master_pub: Option<[u8; 32]>) 
                 small: HFONT::default(),
                 code: HFONT::default(),
                 glyph: HFONT::default(),
-                glyph_sm: HFONT::default(),
+                button: HFONT::default(),
                 link: HFONT::default(),
             },
             field_brush: HBRUSH::default(),
@@ -229,10 +228,10 @@ pub fn run_dialog(mode: Mode, hmac_key: [u8; 32], master_pub: Option<[u8; 32]>) 
 
         // WS_EX_CONTROLPARENT: lets IsDialogMessageW / Tab recurse into the
         // child EDIT controls. WS_EX_APPWINDOW: show a taskbar button so the
-        // window can be foreground-activated. WS_POPUPWINDOW gives it a
-        // border/activatable frame without a caption.
+        // window can be foreground-activated. WS_EX_TOPMOST: keep the dialog
+        // above other windows (it's a modal prompt).
         let hwnd = match CreateWindowExW(
-            WS_EX_CONTROLPARENT | WS_EX_APPWINDOW,
+            WS_EX_CONTROLPARENT | WS_EX_APPWINDOW | WS_EX_TOPMOST,
             class,
             w!("FolderVault"),
             WS_POPUP | WS_VISIBLE,
@@ -406,13 +405,18 @@ unsafe fn on_create(app: &mut App) {
         )
     };
     let mk_font = |pt: i32, weight: i32, face: PCWSTR| mk_font_u(pt, weight, 0, face);
-    app.fonts.title = mk_font(13, FW_SEMIBOLD.0 as i32, w!("Segoe UI"));
-    app.fonts.body = mk_font(10, FW_NORMAL.0 as i32, w!("Segoe UI"));
-    app.fonts.small = mk_font(9, FW_NORMAL.0 as i32, w!("Segoe UI"));
+    // Win11's Segoe UI Variable reads closest to the mockup's Anthropic Sans;
+    // CreateFontW falls back to Segoe UI automatically on Win10 where absent.
+    let ui_disp = w!("Segoe UI Variable Display");
+    let ui_text = w!("Segoe UI Variable Text");
+    const FW_MEDIUM: i32 = 500;
+    app.fonts.title = mk_font(13, FW_MEDIUM, ui_disp);
+    app.fonts.body = mk_font(10, FW_NORMAL.0 as i32, ui_text);
+    app.fonts.small = mk_font(9, FW_NORMAL.0 as i32, ui_text);
     app.fonts.code = mk_font(11, FW_NORMAL.0 as i32, w!("Consolas"));
     app.fonts.glyph = mk_font(15, FW_NORMAL.0 as i32, w!("Segoe MDL2 Assets"));
-    app.fonts.glyph_sm = mk_font(11, FW_NORMAL.0 as i32, w!("Segoe MDL2 Assets"));
-    app.fonts.link = mk_font_u(9, FW_NORMAL.0 as i32, 1, w!("Segoe UI"));
+    app.fonts.button = mk_font(10, FW_MEDIUM, ui_text);
+    app.fonts.link = mk_font_u(9, FW_NORMAL.0 as i32, 1, ui_text);
 
     let instance = GetModuleHandleW(None).unwrap_or_default();
     let mut rc = RECT::default();
@@ -675,6 +679,39 @@ unsafe fn is_visible(hwnd: HWND) -> bool {
     windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(hwnd).as_bool()
 }
 
+/// Hand-drawn eye icon centered in `rc` (matches the mockup rather than an
+/// MDL2 glyph). Outline almond (a wide ellipse) + filled pupil; `open`=false
+/// adds a diagonal slash for the hidden state.
+unsafe fn draw_eye(app: &App, hdc: HDC, rc: &RECT, color: COLORREF, open: bool) {
+    use windows::Win32::Graphics::Gdi::{
+        Ellipse, GetStockObject, LineTo, MoveToEx, HOLLOW_BRUSH,
+    };
+    let cx = (rc.left + rc.right) / 2;
+    let cy = (rc.top + rc.bottom) / 2;
+    let w = s(app, 8); // half-width
+    let h = s(app, 5); // half-height (almond is wider than tall)
+    let pen = CreatePen(PS_SOLID, (s(app, 1)).max(1), color);
+    let hollow = HBRUSH(GetStockObject(HOLLOW_BRUSH).0);
+    let op = SelectObject(hdc, pen);
+    let ob = SelectObject(hdc, hollow);
+    // almond outline
+    let _ = Ellipse(hdc, cx - w, cy - h, cx + w, cy + h);
+    SelectObject(hdc, ob);
+    // filled pupil
+    let pr = s(app, 2).max(2);
+    let pbrush = CreateSolidBrush(color);
+    let ob2 = SelectObject(hdc, pbrush);
+    let _ = Ellipse(hdc, cx - pr, cy - pr, cx + pr, cy + pr);
+    SelectObject(hdc, ob2);
+    let _ = DeleteObject(pbrush);
+    if !open {
+        let _ = MoveToEx(hdc, cx - w - s(app, 1), cy + h, None);
+        let _ = LineTo(hdc, cx + w + s(app, 1), cy - h);
+    }
+    SelectObject(hdc, op);
+    let _ = DeleteObject(pen);
+}
+
 unsafe fn on_drawitem(app: &mut App, dis: &DRAWITEMSTRUCT) {
     let hdc = dis.hDC;
     SetBkMode(hdc, TRANSPARENT);
@@ -683,12 +720,17 @@ unsafe fn on_drawitem(app: &mut App, dis: &DRAWITEMSTRUCT) {
     let pressed = dis.itemState.0 & 0x0001 != 0; // ODS_SELECTED
     match id {
         ID_PRIMARY => {
+            // clear the item to the window bg first so the rounded corners
+            // don't leave dark triangles from the default button face
+            let clr = CreateSolidBrush(BG);
+            FillRect(hdc, &rc, clr);
+            let _ = DeleteObject(clr);
             let bg = if pressed { rgb(0xC9, 0xA2, 0x38) } else { ACCENT };
             let pen = CreatePen(PS_SOLID, 1, bg);
             let brush = CreateSolidBrush(bg);
             let op = SelectObject(hdc, pen);
             let ob = SelectObject(hdc, brush);
-            let r = s(app, 8);
+            let r = s(app, 10);
             let _ = RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, r, r);
             SelectObject(hdc, op);
             SelectObject(hdc, ob);
@@ -699,7 +741,7 @@ unsafe fn on_drawitem(app: &mut App, dis: &DRAWITEMSTRUCT) {
                 Mode::Unlock { .. } => "Unlock",
                 Mode::Setup { .. } => "I saved it",
             };
-            draw_text(hdc, app.fonts.body, ON_ACCENT, &mut rc, label,
+            draw_text(hdc, app.fonts.button, ON_ACCENT, &mut rc, label,
                 DT_SINGLELINE.0 | DT_VCENTER.0 | 0x0001 /*DT_CENTER*/ | DT_NOPREFIX.0);
         }
         ID_CLOSE => {
@@ -711,15 +753,12 @@ unsafe fn on_drawitem(app: &mut App, dis: &DRAWITEMSTRUCT) {
                 DT_SINGLELINE.0 | DT_VCENTER.0 | 0x0001 | DT_NOPREFIX.0);
         }
         ID_EYE => {
-            // sits inside the field: paint the field colour behind the glyph
+            // sits inside the field: paint the field colour behind the icon
             let bg = CreateSolidBrush(FIELD);
             FillRect(hdc, &rc, bg);
             let _ = DeleteObject(bg);
-            // MDL2 glyphs: E7B3 = RedEye (shown), E890 = View (hidden)
-            let glyph = if app.reveal { "\u{E7B3}" } else { "\u{E890}" };
             let color = if pressed || app.reveal { ACCENT } else { MUTED };
-            draw_text(hdc, app.fonts.glyph_sm, color, &mut rc, glyph,
-                DT_SINGLELINE.0 | DT_VCENTER.0 | 0x0001 | DT_NOPREFIX.0);
+            draw_eye(app, hdc, &rc, color, app.reveal);
         }
         ID_LINK => {
             if let Mode::Setup { .. } = app.mode {
@@ -832,7 +871,14 @@ unsafe fn on_primary(app: &mut App) {
             let src = src.clone();
             start_busy(app);
             spawn_worker(app, move |hmac_key, master_pub, progress| {
-                let opts = LockOptions { master_pub, ..Default::default() };
+                let opts = LockOptions {
+                    master_pub,
+                    // send the original folder to the Recycle Bin (recoverable)
+                    // and mark the .fvlt read-only so Explorer confirms deletes
+                    recycle_original: true,
+                    readonly_container: true,
+                    ..Default::default()
+                };
                 let journal = Journal::open(&data_dir().join("journal")).ok();
                 lock_folder(&src, pw.as_bytes(), &hmac_key, &opts, journal.as_ref(), progress)
             });

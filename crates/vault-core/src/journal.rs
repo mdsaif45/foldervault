@@ -117,7 +117,8 @@ fn replay(rec: &Record, hmac_key: &[u8; 32]) -> Option<RecoveryAction> {
                 && verify_structure(container, hmac_key).is_ok()
             {
                 // crash between rename and source delete -> finish the delete
-                fs::remove_dir_all(folder).ok()?;
+                // (recycle so it stays recoverable)
+                crate::trash::recycle(folder).ok()?;
                 return Some(RecoveryAction::FinishedLock(folder.to_path_buf()));
             }
             None
@@ -129,7 +130,8 @@ fn replay(rec: &Record, hmac_key: &[u8; 32]) -> Option<RecoveryAction> {
             }
             if folder.exists() && container.exists() {
                 // crash between rename and container delete -> finish
-                fs::remove_file(container).ok()?;
+                let _ = crate::trash::set_readonly(container, false);
+                crate::trash::recycle(container).ok()?;
                 return Some(RecoveryAction::FinishedUnlock(container.to_path_buf()));
             }
             None

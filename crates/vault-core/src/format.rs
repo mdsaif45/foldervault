@@ -144,6 +144,13 @@ pub struct LockOptions {
     /// Best-effort overwrite of source file contents before deletion.
     /// (SSD wear-leveling limits what this can promise — see THREAT-MODEL.md.)
     pub secure_delete: bool,
+    /// Send the original folder to the Recycle Bin (recoverable) instead of a
+    /// permanent delete. Ignored when `secure_delete` is set (a wipe is,
+    /// by intent, unrecoverable).
+    pub recycle_original: bool,
+    /// Mark the resulting `.fvlt` read-only so Explorer asks before deleting
+    /// it — friction against accidental deletion, not a hard block.
+    pub readonly_container: bool,
 }
 
 /// How the caller is trying to open a container.
@@ -207,9 +214,17 @@ pub fn lock_folder(
 
     fs::rename(&tmp, &dest)?;
     if opts.secure_delete {
+        // a wipe is meant to be unrecoverable, so never recycle in this mode
         wipe_tree(src, &scan.entries);
+        fs::remove_dir_all(src)?;
+    } else if opts.recycle_original {
+        crate::trash::recycle(src)?;
+    } else {
+        fs::remove_dir_all(src)?;
     }
-    fs::remove_dir_all(src)?;
+    if opts.readonly_container {
+        let _ = crate::trash::set_readonly(&dest, true);
+    }
     if let Some((j, p)) = record {
         j.complete(&p);
     }
@@ -327,6 +342,18 @@ pub fn unlock_container(
     journal: Option<&Journal>,
     progress: &mut dyn FnMut(u64, u64),
 ) -> Result<PathBuf> {
+    // the container may be read-only (delete guard set at lock time); clear it
+    // so we can rewrite the lockout header on a wrong-password attempt. If we
+    // then return without extracting (locked out / wrong password), re-arm it.
+    let was_readonly = std::fs::metadata(container).map(|m| m.permissions().readonly()).unwrap_or(false);
+    if was_readonly {
+        let _ = crate::trash::set_readonly(container, false);
+    }
+    let rearm = |c: &Path| {
+        if was_readonly {
+            let _ = crate::trash::set_readonly(c, true);
+        }
+    };
     let mut f = OpenOptions::new().read(true).write(true).open(container)?;
     let mut hb = [0u8; HEADER_LEN];
     f.read_exact(&mut hb)?;
@@ -340,25 +367,35 @@ pub fn unlock_container(
 
     let dk = match credential {
         Credential::Password(password) => {
-            header.lockout.check(now_unix)?;
+            if let Err(e) = header.lockout.check(now_unix) {
+                rearm(container);
+                return Err(e);
+            }
             let kek = derive_kek(password, &header.salt, &header.kdf)?;
             match unwrap_key(&kek, &header.wrapped_dk_pw) {
                 Some(dk) => dk,
                 None => {
                     let err = header.lockout.record_failure(now_unix);
                     rewrite_header(&mut f, &header, hmac_key)?;
+                    rearm(container);
                     return Err(err);
                 }
             }
         }
         Credential::MasterCode(code) => {
             if !is_enrolled(&header.wrapped_dk_mk) {
+                rearm(container);
                 return Err(VaultError::Other(
                     "no master key is enrolled in this container".into(),
                 ));
             }
-            open_dk(code, &header.wrapped_dk_mk)
-                .ok_or_else(|| VaultError::Other("invalid recovery code".into()))?
+            match open_dk(code, &header.wrapped_dk_mk) {
+                Some(dk) => dk,
+                None => {
+                    rearm(container);
+                    return Err(VaultError::Other("invalid recovery code".into()));
+                }
+            }
         }
     };
     if header.lockout != LockoutState::default() || !header.hmac_ok {
@@ -366,15 +403,34 @@ pub fn unlock_container(
         rewrite_header(&mut f, &header, hmac_key)?;
     }
 
-    f.seek(SeekFrom::Start(HEADER_LEN as u64))?;
+    // from here on, any error leaves the container in place; re-arm its
+    // read-only guard on the way out.
+    macro_rules! bail {
+        ($e:expr) => {{
+            rearm(container);
+            return Err($e);
+        }};
+    }
+
+    if let Err(e) = f.seek(SeekFrom::Start(HEADER_LEN as u64)) {
+        bail!(e.into());
+    }
     let mut r = BufReader::with_capacity(CHUNK_SIZE, f);
     let cipher = ChunkCipher::new(&dk, header.uuid);
-    let (nonce, blob) = read_frame(&mut r, MAX_MANIFEST_LEN)?;
-    let manifest = cipher.open(MANIFEST_SEQ, &nonce, &blob)?;
-    let entries: Vec<Entry> =
-        bincode::deserialize(&manifest).map_err(|_| VaultError::Tampered)?;
+    let (nonce, blob) = match read_frame(&mut r, MAX_MANIFEST_LEN) {
+        Ok(v) => v,
+        Err(e) => bail!(e),
+    };
+    let manifest = match cipher.open(MANIFEST_SEQ, &nonce, &blob) {
+        Ok(m) => m,
+        Err(e) => bail!(e),
+    };
+    let entries: Vec<Entry> = match bincode::deserialize(&manifest) {
+        Ok(v) => v,
+        Err(_) => bail!(VaultError::Tampered),
+    };
     if entries.len() as u64 != header.entry_count {
-        return Err(VaultError::Tampered);
+        bail!(VaultError::Tampered);
     }
 
     let stem = container
@@ -387,7 +443,7 @@ pub fn unlock_container(
         .ok_or_else(|| VaultError::Other("container has no parent".into()))?;
     let dest = parent.join(&stem);
     if dest.exists() {
-        return Err(VaultError::Exists(dest));
+        bail!(VaultError::Exists(dest));
     }
     let tmpdir = parent.join(format!("{stem}.__restoring"));
     if tmpdir.exists() {
@@ -398,7 +454,7 @@ pub fn unlock_container(
     let result = extract_entries(&mut r, &cipher, &entries, &tmpdir, header.payload_len, progress);
     if let Err(e) = result {
         let _ = fs::remove_dir_all(&tmpdir);
-        return Err(e);
+        bail!(e);
     }
     drop(r); // close the container before deleting it
 
@@ -415,7 +471,10 @@ pub fn unlock_container(
         .transpose()?;
 
     fs::rename(&tmpdir, &dest)?;
-    fs::remove_file(container)?;
+    // the container may be read-only (delete guard); clear it, then recycle
+    // it so an accidental unlock is undoable.
+    let _ = crate::trash::set_readonly(container, false);
+    crate::trash::recycle(container)?;
     if let Some((j, p)) = record {
         j.complete(&p);
     }
