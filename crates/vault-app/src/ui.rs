@@ -17,7 +17,8 @@ use windows::Win32::Graphics::Gdi::{
     FillRect, GetMonitorInfoW, InvalidateRect, MonitorFromPoint, RoundRect, SelectObject,
     SetBkColor, SetBkMode, SetTextColor, HBRUSH, HDC, HFONT, MONITORINFO,
     MONITOR_DEFAULTTONEAREST, PAINTSTRUCT, PS_SOLID, TRANSPARENT,
-    DT_END_ELLIPSIS, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, FW_NORMAL, FW_SEMIBOLD,
+    DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, FW_NORMAL,
+    FW_SEMIBOLD,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::DRAWITEMSTRUCT;
@@ -57,6 +58,7 @@ const TEXT: COLORREF = rgb(0xEC, 0xEC, 0xF0);
 const MUTED: COLORREF = rgb(0x8B, 0x8B, 0x96);
 const ACCENT: COLORREF = rgb(0xE1, 0xB9, 0x4A);
 const ON_ACCENT: COLORREF = rgb(0x2B, 0x24, 0x10);
+const BADGE_BG: COLORREF = rgb(0x2C, 0x2C, 0x36);
 const DANGER: COLORREF = rgb(0xE2, 0x4B, 0x4A);
 const WARN: COLORREF = rgb(0xD8, 0x9A, 0x3E);
 const OK_GREEN: COLORREF = rgb(0x6F, 0xC4, 0x7E);
@@ -66,6 +68,7 @@ const ID_EDIT2: isize = 101;
 const ID_PRIMARY: isize = 1; // IDOK so Enter triggers it via WM_GETDEFID
 const ID_CLOSE: isize = 2; // IDCANCEL so Esc closes
 const ID_LINK: isize = 102;
+const ID_EYE: isize = 103; // reveal-password toggle inside the field
 
 const WM_APP_PROGRESS: u32 = WM_APP + 1;
 const WM_APP_DONE: u32 = WM_APP + 2;
@@ -106,6 +109,7 @@ struct App {
     master_mode: bool, // unlock: entering recovery code instead of password
     master_available: bool,
     progress_pct: u32,
+    reveal: bool, // password shown in clear (eye toggle)
     shake_step: i32,
     origin: (i32, i32),
     result: Arc<Mutex<Option<Result<PathBuf, VaultError>>>>,
@@ -122,6 +126,8 @@ struct Fonts {
     small: HFONT,
     code: HFONT,
     glyph: HFONT,
+    glyph_sm: HFONT, // smaller MDL2 for the eye toggle
+    link: HFONT,     // underlined small for text links
 }
 
 fn s(app: &App, v: i32) -> i32 {
@@ -183,6 +189,7 @@ pub fn run_dialog(mode: Mode, hmac_key: [u8; 32], master_pub: Option<[u8; 32]>) 
             master_mode: false,
             master_available: master_pub.is_some() || matches!(mode, Mode::Unlock { .. }),
             progress_pct: 0,
+            reveal: false,
             shake_step: 0,
             origin: (0, 0),
             result: Arc::new(Mutex::new(None)),
@@ -194,6 +201,8 @@ pub fn run_dialog(mode: Mode, hmac_key: [u8; 32], master_pub: Option<[u8; 32]>) 
                 small: HFONT::default(),
                 code: HFONT::default(),
                 glyph: HFONT::default(),
+                glyph_sm: HFONT::default(),
+                link: HFONT::default(),
             },
             field_brush: HBRUSH::default(),
             succeeded: false,
@@ -202,9 +211,9 @@ pub fn run_dialog(mode: Mode, hmac_key: [u8; 32], master_pub: Option<[u8; 32]>) 
         let app_ptr = Box::into_raw(app);
 
         let (w_du, h_du) = match &(*app_ptr).mode {
-            Mode::Lock { .. } => (384, 248),
-            Mode::Unlock { .. } => (384, 214),
-            Mode::Setup { .. } => (440, 264),
+            Mode::Lock { .. } => (420, 252),
+            Mode::Unlock { .. } => (420, 214),
+            Mode::Setup { .. } => (460, 268),
         };
         // position near the cursor's monitor center
         let mut pt = Default::default();
@@ -305,6 +314,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     let _ = DestroyWindow(hwnd);
                 }
                 ID_LINK => on_toggle_master(app),
+                ID_EYE => on_toggle_reveal(app),
                 _ => {}
             }
             LRESULT(0)
@@ -378,12 +388,15 @@ unsafe fn on_create(app: &mut App) {
         4,
     );
 
-    let mk_font = |pt: i32, weight: i32, face: PCWSTR| -> HFONT {
+    let dpi_f = app.dpi;
+    let mk_font_u = move |pt: i32, weight: i32, underline: u32, face: PCWSTR| -> HFONT {
         CreateFontW(
-            -((pt as f32 * app.dpi * 96.0 / 72.0) as i32),
+            -((pt as f32 * dpi_f * 96.0 / 72.0) as i32),
             0, 0, 0,
             weight,
-            0, 0, 0,
+            0,          // italic
+            underline,  // underline
+            0,          // strikeout
             1, // DEFAULT_CHARSET
             0, // OUT_DEFAULT_PRECIS
             0, // CLIP_DEFAULT_PRECIS
@@ -392,11 +405,14 @@ unsafe fn on_create(app: &mut App) {
             face,
         )
     };
+    let mk_font = |pt: i32, weight: i32, face: PCWSTR| mk_font_u(pt, weight, 0, face);
     app.fonts.title = mk_font(13, FW_SEMIBOLD.0 as i32, w!("Segoe UI"));
     app.fonts.body = mk_font(10, FW_NORMAL.0 as i32, w!("Segoe UI"));
     app.fonts.small = mk_font(9, FW_NORMAL.0 as i32, w!("Segoe UI"));
     app.fonts.code = mk_font(11, FW_NORMAL.0 as i32, w!("Consolas"));
-    app.fonts.glyph = mk_font(14, FW_NORMAL.0 as i32, w!("Segoe MDL2 Assets"));
+    app.fonts.glyph = mk_font(15, FW_NORMAL.0 as i32, w!("Segoe MDL2 Assets"));
+    app.fonts.glyph_sm = mk_font(11, FW_NORMAL.0 as i32, w!("Segoe MDL2 Assets"));
+    app.fonts.link = mk_font_u(9, FW_NORMAL.0 as i32, 1, w!("Segoe UI"));
 
     let instance = GetModuleHandleW(None).unwrap_or_default();
     let mut rc = RECT::default();
@@ -405,15 +421,17 @@ unsafe fn on_create(app: &mut App) {
     let dpi = app.dpi;
     let sc = move |v: i32| (v as f32 * dpi) as i32;
 
-    let mk_edit = move |y: i32, h: i32, style: u32, id: isize| -> HWND {
+    // password fields leave a gutter on the right for the eye toggle
+    let mk_edit = move |y: i32, h: i32, style: u32, id: isize, eye_gutter: bool| -> HWND {
+        let right_pad = if eye_gutter { sc(44) } else { sc(24) };
         CreateWindowExW(
             WINDOW_EX_STYLE(0),
             w!("EDIT"),
             PCWSTR::null(),
             WINDOW_STYLE(style) | WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-            sc(24) + sc(12),
+            sc(24) + sc(14),
             y + (h - sc(20)) / 2,
-            cw - sc(48) - sc(24),
+            cw - sc(24) - sc(14) - right_pad,
             sc(20),
             hwnd,
             HMENU(id as *mut _),
@@ -439,18 +457,22 @@ unsafe fn on_create(app: &mut App) {
 
     match &app.mode {
         Mode::Lock { .. } => {
-            app.edit = mk_edit(sc(74), sc(34), (ES_PASSWORD | ES_AUTOHSCROLL) as u32, ID_EDIT);
-            app.edit2 = mk_edit(sc(116), sc(34), (ES_PASSWORD | ES_AUTOHSCROLL) as u32, ID_EDIT2);
+            app.edit = mk_edit(sc(78), sc(38), (ES_PASSWORD | ES_AUTOHSCROLL) as u32, ID_EDIT, true);
+            app.edit2 = mk_edit(sc(122), sc(38), (ES_PASSWORD | ES_AUTOHSCROLL) as u32, ID_EDIT2, false);
             set_cue(app.edit, "Password");
             set_cue(app.edit2, "Confirm password");
-            mk_button(cw - sc(24 + 96), sc(248 - 24 - 34), sc(96), sc(34), ID_PRIMARY);
+            // eye toggle inside the first (password) field
+            mk_button(cw - sc(24) - sc(30), sc(78) + sc(9), sc(24), sc(20), ID_EYE);
+            mk_button(cw - sc(24 + 104), sc(252 - 22 - 36), sc(104), sc(36), ID_PRIMARY);
         }
         Mode::Unlock { .. } => {
-            app.edit = mk_edit(sc(74), sc(34), (ES_PASSWORD | ES_AUTOHSCROLL) as u32, ID_EDIT);
+            app.edit = mk_edit(sc(78), sc(38), (ES_PASSWORD | ES_AUTOHSCROLL) as u32, ID_EDIT, true);
             set_cue(app.edit, "Password");
-            mk_button(cw - sc(24 + 96), sc(214 - 24 - 34), sc(96), sc(34), ID_PRIMARY);
-            // "Use recovery code" link
-            mk_button(sc(24), sc(214 - 24 - 30), sc(150), sc(26), ID_LINK);
+            // eye toggle inside the field
+            mk_button(cw - sc(24) - sc(30), sc(78) + sc(9), sc(24), sc(20), ID_EYE);
+            mk_button(cw - sc(24 + 104), sc(214 - 22 - 36), sc(104), sc(36), ID_PRIMARY);
+            // "Use recovery code" underlined text link (left-aligned, drawn as link)
+            mk_button(sc(24), sc(214 - 22 - 32), sc(160), sc(28), ID_LINK);
             // read container stats for the subtitle + lockout state
             if let Mode::Unlock { container } = &app.mode {
                 if let Ok(h) = vault_core::format::inspect(container, &app.hmac_key) {
@@ -477,9 +499,9 @@ unsafe fn on_create(app: &mut App) {
                 w!("EDIT"),
                 PCWSTR(wide(&code_w).as_ptr()),
                 WINDOW_STYLE((ES_MULTILINE | ES_READONLY) as u32) | WS_CHILD | WS_VISIBLE,
-                sc(24) + sc(12),
-                sc(84),
-                sc(440 - 48 - 24),
+                sc(24) + sc(14),
+                sc(86),
+                cw - sc(48) - sc(28),
                 sc(56),
                 hwnd,
                 HMENU(ID_EDIT as *mut _),
@@ -488,8 +510,8 @@ unsafe fn on_create(app: &mut App) {
             )
             .unwrap_or_default();
             SendMessageW(app.edit, WM_SETFONT, WPARAM(app.fonts.code.0 as usize), LPARAM(1));
-            mk_button(cw - sc(24 + 130), sc(264 - 24 - 34), sc(130), sc(34), ID_PRIMARY);
-            mk_button(sc(24), sc(264 - 24 - 34), sc(90), sc(34), ID_LINK); // Copy
+            mk_button(cw - sc(24 + 120), sc(268 - 22 - 36), sc(120), sc(36), ID_PRIMARY);
+            mk_button(sc(24), sc(268 - 22 - 36), sc(92), sc(36), ID_LINK); // Copy
             app.status = "Anyone with this code can unlock your folders. Store it safely — \
                           it is shown only once.".into();
             app.status_color = MUTED;
@@ -533,13 +555,32 @@ unsafe fn on_paint(app: &mut App) {
     let cw = rc.right;
     let ch = rc.bottom;
 
-    // header: padlock glyph + title + subtitle
-    let mut r = RECT { left: s(app, 24), top: s(app, 20), right: s(app, 52), bottom: s(app, 52) };
-    draw_text(hdc, app.fonts.glyph, ACCENT, &mut r, "\u{E72E}", DT_SINGLELINE.0 | DT_VCENTER.0 | DT_NOPREFIX.0);
-    let mut r = RECT { left: s(app, 58), top: s(app, 16), right: cw - s(app, 48), bottom: s(app, 38) };
+    // header: rounded lock badge + padlock glyph + title + subtitle
+    let badge = RECT {
+        left: s(app, 22),
+        top: s(app, 20),
+        right: s(app, 22) + s(app, 38),
+        bottom: s(app, 20) + s(app, 38),
+    };
+    let bpen = CreatePen(PS_SOLID, 1, BADGE_BG);
+    let bbrush = CreateSolidBrush(BADGE_BG);
+    let op = SelectObject(hdc, bpen);
+    let ob = SelectObject(hdc, bbrush);
+    let br = s(app, 9);
+    let _ = RoundRect(hdc, badge.left, badge.top, badge.right, badge.bottom, br, br);
+    SelectObject(hdc, op);
+    SelectObject(hdc, ob);
+    let _ = DeleteObject(bpen);
+    let _ = DeleteObject(bbrush);
+    let mut r = badge;
+    draw_text(hdc, app.fonts.glyph, ACCENT, &mut r, "\u{E72E}",
+        DT_SINGLELINE.0 | DT_VCENTER.0 | 0x0001 /*DT_CENTER*/ | DT_NOPREFIX.0);
+
+    let text_left = s(app, 22) + s(app, 38) + s(app, 12);
+    let mut r = RECT { left: text_left, top: s(app, 21), right: cw - s(app, 46), bottom: s(app, 42) };
     draw_text(hdc, app.fonts.title, TEXT, &mut r, &app.title, DT_SINGLELINE.0 | DT_END_ELLIPSIS.0 | DT_NOPREFIX.0);
-    let mut r = RECT { left: s(app, 58), top: s(app, 38), right: cw - s(app, 48), bottom: s(app, 56) };
-    draw_text(hdc, app.fonts.small, MUTED, &mut r, &app.subtitle, DT_SINGLELINE.0 | DT_NOPREFIX.0);
+    let mut r = RECT { left: text_left, top: s(app, 43), right: cw - s(app, 46), bottom: s(app, 60) };
+    draw_text(hdc, app.fonts.small, MUTED, &mut r, &app.subtitle, DT_SINGLELINE.0 | DT_END_ELLIPSIS.0 | DT_NOPREFIX.0);
 
     match app.phase {
         Phase::Busy => {
@@ -568,8 +609,8 @@ unsafe fn on_paint(app: &mut App) {
                 &format!("{verb}… {}%", app.progress_pct), DT_SINGLELINE.0 | DT_NOPREFIX.0);
         }
         _ => {
-            // field borders behind the edit controls
-            for (edit, y, h) in [(app.edit, 74, 34), (app.edit2, 116, 34)] {
+            // field borders behind the edit controls (fields at y=78, y=122, h=38)
+            for (edit, y, h) in [(app.edit, 78, 38), (app.edit2, 122, 38)] {
                 if edit.is_invalid() || matches!(app.mode, Mode::Setup { .. }) {
                     continue;
                 }
@@ -579,34 +620,36 @@ unsafe fn on_paint(app: &mut App) {
                 draw_field_border(app, hdc, s(app, 24), s(app, y), cw - s(app, 48), s(app, h));
             }
             if let Mode::Setup { .. } = app.mode {
-                draw_field_border(app, hdc, s(app, 24), s(app, 76), cw - s(app, 48), s(app, 72));
+                draw_field_border(app, hdc, s(app, 24), s(app, 80), cw - s(app, 48), s(app, 68));
             }
-            // attempt dots (unlock only)
+            // attempt dots + label on ONE row (unlock only), below the field
             if let Mode::Unlock { .. } = app.mode {
-                let dots_y = s(app, 120);
+                let dots_y = s(app, 126);
+                let d = s(app, 7);
                 for i in 0..MAX_ATTEMPTS as i32 {
-                    let x = s(app, 26) + i * s(app, 14);
+                    let x = s(app, 24) + i * s(app, 13);
                     let color = if (i as u32) < app.fail_count { DANGER } else { BORDER };
                     let b = CreateSolidBrush(color);
                     let pen = CreatePen(PS_SOLID, 1, color);
                     let ob = SelectObject(hdc, b);
                     let op = SelectObject(hdc, pen);
-                    let d = s(app, 7);
                     let _ = windows::Win32::Graphics::Gdi::Ellipse(hdc, x, dots_y, x + d, dots_y + d);
                     SelectObject(hdc, ob);
                     SelectObject(hdc, op);
                     let _ = DeleteObject(b);
                     let _ = DeleteObject(pen);
                 }
-                let mut r = RECT { left: s(app, 26 + 3 * 14 + 6), top: dots_y - s(app, 4), right: cw - s(app, 24), bottom: dots_y + s(app, 14) };
-                draw_text(hdc, app.fonts.small, app.status_color, &mut r, &app.status, DT_SINGLELINE.0 | DT_NOPREFIX.0);
+                // label right-aligned on the same baseline as the dots
+                let mut r = RECT { left: s(app, 100), top: dots_y - s(app, 5), right: cw - s(app, 24), bottom: dots_y + s(app, 14) };
+                draw_text(hdc, app.fonts.small, app.status_color, &mut r, &app.status,
+                    DT_SINGLELINE.0 | DT_VCENTER.0 | DT_RIGHT.0 | DT_NOPREFIX.0);
             } else {
                 // status line (lock/setup)
                 let top = match app.mode {
-                    Mode::Lock { .. } => s(app, 158),
+                    Mode::Lock { .. } => s(app, 166),
                     _ => s(app, 156),
                 };
-                let mut r = RECT { left: s(app, 24), top, right: cw - s(app, 24), bottom: top + s(app, 46) };
+                let mut r = RECT { left: s(app, 24), top, right: cw - s(app, 24), bottom: top + s(app, 44) };
                 draw_text(hdc, app.fonts.small, app.status_color, &mut r, &app.status,
                     DT_NOPREFIX.0 | windows::Win32::Graphics::Gdi::DT_WORDBREAK.0);
             }
@@ -660,22 +703,44 @@ unsafe fn on_drawitem(app: &mut App, dis: &DRAWITEMSTRUCT) {
                 DT_SINGLELINE.0 | DT_VCENTER.0 | 0x0001 /*DT_CENTER*/ | DT_NOPREFIX.0);
         }
         ID_CLOSE => {
+            let bg = CreateSolidBrush(BG);
+            FillRect(hdc, &rc, bg);
+            let _ = DeleteObject(bg);
             let color = if pressed { TEXT } else { MUTED };
             draw_text(hdc, app.fonts.body, color, &mut rc, "\u{2715}",
                 DT_SINGLELINE.0 | DT_VCENTER.0 | 0x0001 | DT_NOPREFIX.0);
         }
-        ID_LINK => {
-            let label = match app.mode {
-                Mode::Setup { .. } => "Copy",
-                _ if app.master_mode => "Use password",
-                _ => "Use recovery code",
-            };
-            let color = if pressed { TEXT } else { MUTED };
-            if let Mode::Setup { .. } = app.mode {
-                draw_field_border(app, hdc, rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top);
-            }
-            draw_text(hdc, app.fonts.small, color, &mut rc, label,
+        ID_EYE => {
+            // sits inside the field: paint the field colour behind the glyph
+            let bg = CreateSolidBrush(FIELD);
+            FillRect(hdc, &rc, bg);
+            let _ = DeleteObject(bg);
+            // MDL2 glyphs: E7B3 = RedEye (shown), E890 = View (hidden)
+            let glyph = if app.reveal { "\u{E7B3}" } else { "\u{E890}" };
+            let color = if pressed || app.reveal { ACCENT } else { MUTED };
+            draw_text(hdc, app.fonts.glyph_sm, color, &mut rc, glyph,
                 DT_SINGLELINE.0 | DT_VCENTER.0 | 0x0001 | DT_NOPREFIX.0);
+        }
+        ID_LINK => {
+            if let Mode::Setup { .. } = app.mode {
+                // Setup's "Copy" stays a bordered button
+                let label = "Copy";
+                let color = if pressed { TEXT } else { MUTED };
+                draw_field_border(app, hdc, rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top);
+                draw_text(hdc, app.fonts.small, color, &mut rc, label,
+                    DT_SINGLELINE.0 | DT_VCENTER.0 | 0x0001 | DT_NOPREFIX.0);
+            } else {
+                // Unlock's link: underlined text, left-aligned, no border.
+                // Paint the whole item background with the window color first
+                // so no default button face / focus box shows through.
+                let bg = CreateSolidBrush(BG);
+                FillRect(hdc, &rc, bg);
+                let _ = DeleteObject(bg);
+                let label = if app.master_mode { "Use password" } else { "Use recovery code" };
+                let color = if pressed { ACCENT } else { MUTED };
+                draw_text(hdc, app.fonts.link, color, &mut rc, label,
+                    DT_SINGLELINE.0 | DT_VCENTER.0 | DT_LEFT.0 | DT_NOPREFIX.0);
+            }
         }
         _ => {}
     }
@@ -687,6 +752,24 @@ unsafe fn get_text(edit: HWND) -> String {
     let mut buf = [0u16; 512];
     let n = GetWindowTextW(edit, &mut buf);
     String::from_utf16_lossy(&buf[..n.max(0) as usize])
+}
+
+unsafe fn on_toggle_reveal(app: &mut App) {
+    // no-op in master-code mode (the field is already plaintext)
+    if app.master_mode {
+        return;
+    }
+    app.reveal = !app.reveal;
+    // EM_SETPASSWORDCHAR: 0 = show text, 0x25CF = bullet
+    SendMessageW(
+        app.edit,
+        0x00CC,
+        WPARAM(if app.reveal { 0 } else { 0x25CF }),
+        LPARAM(0),
+    );
+    let _ = InvalidateRect(app.edit, None, true);
+    let _ = SetFocus(app.edit);
+    let _ = InvalidateRect(app.hwnd, None, false); // repaint the eye glyph
 }
 
 unsafe fn on_toggle_master(app: &mut App) {
