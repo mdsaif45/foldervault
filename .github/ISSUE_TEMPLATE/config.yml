@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/mdsaif45/foldervault/security/advisories/new
+    about: Please report vulnerabilities privately, not as a public issue.
+  - name: Question or discussion
+    url: https://github.com/mdsaif45/foldervault/discussions
+    about: For usage questions and ideas (if Discussions is enabled).
