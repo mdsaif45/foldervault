@@ -57,6 +57,10 @@ fn main() {
             shell::register_if_needed(&exe);
             ui::run_dialog(ui::Mode::Unlock { container: PathBuf::from(path) }, hmac_key, None);
         }
+        (Some("delete"), Some(path)) => {
+            shell::register_if_needed(&exe);
+            ui::run_dialog(ui::Mode::Delete { container: PathBuf::from(path) }, hmac_key, None);
+        }
         (Some("unregister"), _) => {
             // used by the installer's uninstaller
             shell::unregister();

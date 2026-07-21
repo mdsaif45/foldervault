@@ -168,6 +168,19 @@ never lossy. **At no point can both copies be gone.**
     files + HKCU entries).
   - Deferred: production code-signing cert (no clients yet), auto-update check.
 
+- **Delete restriction (v0.2 — done)**: password-gated delete. A
+  "Delete with FolderVault" verb on `.fvlt` (and `fvlt delete`) verifies the
+  password/recovery code via `format::verify_and_delete` (reuses unlock's
+  header/credential/lockout prologue, shares the 3-attempt / 24 h lockout),
+  then recycles the container. **Convenience gate, not enforcement** — the OS
+  delete still works.
+  - Progression toward real enforcement: **v0.3** applies a deny-delete **ACL**
+    on lock so plain Delete/Shift+Del/`del` are blocked for a standard user
+    (no admin, no driver; take-ownership/another-OS still bypasses). The verb
+    UI is unchanged; only the enforcement gets teeth. A kernel minifilter (the
+    only true block) stays out of scope — needs a signed driver + admin and
+    contradicts the lightweight goal.
+
 ## Performance budget
 
 | Metric                     | Target                          |

@@ -80,6 +80,27 @@ pub fn register(exe: &Path) -> windows::core::Result<()> {
         None,
         &open_cmd,
     )?;
+    // password-gated delete verb on locked containers (a convenience prompt,
+    // not a hard block — plain Delete still works; see docs/THREAT-MODEL.md)
+    let delete_cmd = format!("\"{exe}\" delete \"%1\"");
+    set_value(
+        HKEY_CURRENT_USER,
+        r"Software\Classes\FolderVault.Container\shell\FolderVault.Delete",
+        None,
+        "Delete with FolderVault",
+    )?;
+    set_value(
+        HKEY_CURRENT_USER,
+        r"Software\Classes\FolderVault.Container\shell\FolderVault.Delete",
+        Some("Icon"),
+        &icon_app,
+    )?;
+    set_value(
+        HKEY_CURRENT_USER,
+        r"Software\Classes\FolderVault.Container\shell\FolderVault.Delete\command",
+        None,
+        &delete_cmd,
+    )?;
     set_value(
         HKEY_CURRENT_USER,
         r"Software\Classes\Directory\shell\FolderVault.Lock",
@@ -109,13 +130,34 @@ pub fn register(exe: &Path) -> windows::core::Result<()> {
     Ok(())
 }
 
-/// Cheap idempotent registration for every launch: re-registers only when the
-/// exe path differs from what's recorded (or nothing is recorded yet). This
-/// self-heals a portable build the user moved to a new folder.
+/// Cheap idempotent registration for every launch: re-registers when the exe
+/// path differs from what's recorded (self-heals a moved portable build) OR
+/// when a newer registration key is missing (self-heals an upgrade that added
+/// entries, e.g. the Delete verb).
 pub fn register_if_needed(exe: &Path) {
     let want = exe.to_string_lossy().to_string();
-    if read_registered_exe().as_deref() != Some(want.as_str()) {
+    if read_registered_exe().as_deref() != Some(want.as_str()) || !delete_verb_present() {
         let _ = register(exe);
+    }
+}
+
+/// Is the Delete verb registered? Used to force a re-register after an upgrade
+/// that introduced it, even when the exe path is unchanged.
+fn delete_verb_present() -> bool {
+    use windows::Win32::System::Registry::{RegGetValueW, RRF_RT_REG_SZ};
+    unsafe {
+        let subkey = wide(r"Software\Classes\FolderVault.Container\shell\FolderVault.Delete\command");
+        let mut size = 0u32;
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            PCWSTR(subkey.as_ptr()),
+            PCWSTR::null(),
+            RRF_RT_REG_SZ,
+            None,
+            None,
+            Some(&mut size),
+        )
+        .is_ok()
     }
 }
 

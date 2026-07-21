@@ -87,13 +87,19 @@ Tamper / foreign check on every open:
 ## CLI surface (vault-cli, also the test harness)
 
 ```
-fvlt lock   <folder> [--password-stdin] [--secure-delete]
+fvlt lock   <folder> [--password-stdin] [--secure-delete] [--recycle] [--readonly]
 fvlt unlock <file>   [--password-stdin | --master-stdin]
+fvlt delete <file>   [--password-stdin | --master-stdin]  # verify -> recycle
 fvlt inspect <file>          # header + lockout state, no secrets
 fvlt verify <file>           # structural integrity walk, no credentials
 fvlt master-init [--force]   # generate recovery code (printed once)
 fvlt recover                 # replay crash-recovery journal (also automatic)
 ```
+
+`delete` verifies the password/recovery code (sharing unlock's 3-attempt / 24 h
+lockout, so it can't be used as an unlimited oracle) and, on success, sends the
+container to the Recycle Bin without extracting. It is a *convenience gate*, not
+enforcement — the OS's own delete still works (see THREAT-MODEL.md).
 
 ## Crash-recovery journal
 

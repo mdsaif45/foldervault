@@ -24,6 +24,9 @@ DAILY USE
     and folders FolderVault removes go to the Recycle Bin, so mistakes are
     recoverable. This is friction, not a guarantee -- back up anything you
     can't afford to lose (encryption protects secrecy, not against deletion).
+  * Delete safely: right-click a .fvlt -> "Delete with FolderVault" (or
+    "fvlt delete") asks for the password before recycling it. Note the normal
+    Windows Delete still works -- this is a convenience, not a hard lock.
 
 PORTABLE NOTE
 -------------

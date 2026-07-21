@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 
 use vault_core::crypto::KdfParams;
 use vault_core::format::{
-    inspect, lock_folder, unlock_container, verify_structure, Credential, LockOptions,
+    inspect, lock_folder, unlock_container, verify_and_delete, verify_structure, Credential,
+    LockOptions,
 };
 use vault_core::journal::{Journal, OpKind, Record, RecoveryAction};
 use vault_core::recovery;
@@ -186,6 +187,91 @@ fn master_code_rejected_when_not_enrolled() {
         Err(VaultError::Other(msg)) => assert!(msg.contains("no master key")),
         other => panic!("expected not-enrolled error, got {other:?}"),
     }
+}
+
+// ---------- password-gated delete ----------
+
+fn del(c: &Path, pw: &[u8], now: u64) -> vault_core::Result<()> {
+    verify_and_delete(c, Credential::Password(pw), &HMAC_KEY, now)
+}
+
+#[test]
+fn correct_password_deletes_the_container() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = build_tree(tmp.path());
+    let container = lock(&src, b"right").unwrap();
+    del(&container, b"right", NOW).unwrap();
+    assert!(!container.exists(), "container must be gone after a verified delete");
+    assert!(!src.exists(), "delete must not resurrect the original folder");
+}
+
+#[test]
+fn wrong_password_does_not_delete_and_counts_down() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = build_tree(tmp.path());
+    let container = lock(&src, b"right").unwrap();
+
+    match del(&container, b"nope", NOW) {
+        Err(VaultError::WrongPassword { attempts_left }) => assert_eq!(attempts_left, 2),
+        other => panic!("expected WrongPassword, got {other:?}"),
+    }
+    assert!(container.exists(), "wrong password must not delete the container");
+    assert_eq!(inspect(&container, &HMAC_KEY).unwrap().lockout.fail_count, 1);
+}
+
+#[test]
+fn delete_shares_the_unlock_lockout() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = build_tree(tmp.path());
+    let container = lock(&src, b"right").unwrap();
+
+    // two failed deletes then one failed unlock -> third strike locks both paths
+    assert!(matches!(del(&container, b"x", NOW), Err(VaultError::WrongPassword { attempts_left: 2 })));
+    assert!(matches!(del(&container, b"x", NOW), Err(VaultError::WrongPassword { attempts_left: 1 })));
+    assert!(matches!(del(&container, b"x", NOW), Err(VaultError::LockedOut { .. })));
+    // correct password is now refused for BOTH delete and unlock during the window
+    assert!(matches!(del(&container, b"right", NOW + 60), Err(VaultError::LockedOut { .. })));
+    assert!(matches!(unlock(&container, b"right", NOW + 60), Err(VaultError::LockedOut { .. })));
+    assert!(container.exists());
+}
+
+#[test]
+fn master_code_deletes_during_lockout() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = build_tree(tmp.path());
+    let master = recovery::generate();
+    let mut opts = fast_opts();
+    opts.master_pub = Some(master.public);
+    let container = lock_folder(&src, b"forgotten", &HMAC_KEY, &opts, None, &mut nop).unwrap();
+
+    for _ in 0..3 {
+        let _ = del(&container, b"guess", NOW);
+    }
+    assert!(matches!(del(&container, b"forgotten", NOW), Err(VaultError::LockedOut { .. })));
+    // recovery code deletes even during the lockout
+    verify_and_delete(&container, Credential::MasterCode(&master.code), &HMAC_KEY, NOW).unwrap();
+    assert!(!container.exists());
+}
+
+#[test]
+fn delete_re_arms_readonly_on_wrong_password() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = build_tree(tmp.path());
+    let mut opts = fast_opts();
+    opts.readonly_container = true;
+    let container = lock_folder(&src, b"right", &HMAC_KEY, &opts, None, &mut nop).unwrap();
+    assert!(fs::metadata(&container).unwrap().permissions().readonly());
+
+    // wrong password: container survives AND stays read-only
+    let _ = del(&container, b"nope", NOW);
+    assert!(container.exists());
+    assert!(
+        fs::metadata(&container).unwrap().permissions().readonly(),
+        "read-only guard must be re-armed after a failed delete"
+    );
+    // correct password clears read-only and deletes
+    del(&container, b"right", NOW).unwrap();
+    assert!(!container.exists());
 }
 
 #[test]

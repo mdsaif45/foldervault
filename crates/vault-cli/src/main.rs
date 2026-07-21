@@ -18,7 +18,8 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use vault_core::format::{
-    inspect, lock_folder, unlock_container, verify_structure, Credential, LockOptions,
+    inspect, lock_folder, unlock_container, verify_and_delete, verify_structure, Credential,
+    LockOptions,
 };
 use vault_core::journal::Journal;
 use vault_core::secrets::{self, data_dir, load_or_create_install_key as install_key};
@@ -134,6 +135,36 @@ fn run(args: &[String]) -> i32 {
                 Err(e) => err_code(&e),
             }
         }
+        "delete" => {
+            let path = match rest.iter().find(|a| !a.starts_with("--")) {
+                Some(p) => PathBuf::from(p),
+                None => return usage(),
+            };
+            let use_master = flag("--master-stdin");
+            let secret = match read_secret(
+                if use_master { "recovery code: " } else { "password: " },
+                flag("--password-stdin") || use_master,
+                false,
+            ) {
+                Ok(p) => p,
+                Err(e) => return fail(&e),
+            };
+            let cred = if use_master {
+                Credential::MasterCode(&secret)
+            } else {
+                Credential::Password(secret.as_bytes())
+            };
+            // password-gated delete: verifies then recycles the container.
+            // NOTE: this is a convenience gate, not enforcement — the OS delete
+            // still works. See docs/THREAT-MODEL.md.
+            match verify_and_delete(&path, cred, &hmac_key, now_unix()) {
+                Ok(()) => {
+                    eprintln!("deleted -> {} (moved to Recycle Bin)", path.display());
+                    0
+                }
+                Err(e) => err_code(&e),
+            }
+        }
         "inspect" => {
             let path = match rest.first() {
                 Some(p) => PathBuf::from(p),
@@ -179,6 +210,7 @@ fn run(args: &[String]) -> i32 {
 fn usage() -> i32 {
     eprintln!("usage: fvlt lock <folder> [--password-stdin] [--secure-delete] [--recycle] [--readonly]");
     eprintln!("       fvlt unlock <file> [--password-stdin | --master-stdin]");
+    eprintln!("       fvlt delete <file> [--password-stdin | --master-stdin]  (verify then recycle)");
     eprintln!("       fvlt inspect|verify <file>");
     eprintln!("       fvlt master-init [--force] | recover");
     2

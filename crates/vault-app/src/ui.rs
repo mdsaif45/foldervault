@@ -38,7 +38,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_EX_CONTROLPARENT, WS_EX_TOPMOST, WS_POPUP, WS_TABSTOP, WS_VISIBLE,
 };
 
-use vault_core::format::{lock_folder, unlock_container, Credential, LockOptions};
+use vault_core::format::{
+    lock_folder, unlock_container, verify_and_delete, Credential, LockOptions,
+};
 use vault_core::journal::Journal;
 use vault_core::lockout::MAX_ATTEMPTS;
 use vault_core::VaultError;
@@ -83,6 +85,8 @@ pub enum Mode {
     Lock { src: PathBuf },
     /// Password (or recovery code) -> decrypt container.
     Unlock { container: PathBuf },
+    /// Password (or recovery code) -> recycle the container (no extraction).
+    Delete { container: PathBuf },
     /// Show the one-time recovery code.
     Setup { code: String },
 }
@@ -168,6 +172,13 @@ pub fn run_dialog(mode: Mode, hmac_key: [u8; 32], master_pub: Option<[u8; 32]>) 
                     .unwrap_or_default(),
                 "Locked folder".to_string(),
             ),
+            Mode::Delete { container } => (
+                container
+                    .file_stem()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                "Delete this locked folder".to_string(),
+            ),
             Mode::Setup { .. } => (
                 "FolderVault".to_string(),
                 "Save your recovery code".to_string(),
@@ -186,7 +197,8 @@ pub fn run_dialog(mode: Mode, hmac_key: [u8; 32], master_pub: Option<[u8; 32]>) 
             status_color: MUTED,
             fail_count: 0,
             master_mode: false,
-            master_available: master_pub.is_some() || matches!(mode, Mode::Unlock { .. }),
+            master_available: master_pub.is_some()
+                || matches!(mode, Mode::Unlock { .. } | Mode::Delete { .. }),
             progress_pct: 0,
             reveal: false,
             shake_step: 0,
@@ -211,7 +223,7 @@ pub fn run_dialog(mode: Mode, hmac_key: [u8; 32], master_pub: Option<[u8; 32]>) 
 
         let (w_du, h_du) = match &(*app_ptr).mode {
             Mode::Lock { .. } => (420, 252),
-            Mode::Unlock { .. } => (420, 214),
+            Mode::Unlock { .. } | Mode::Delete { .. } => (420, 214),
             Mode::Setup { .. } => (460, 268),
         };
         // position near the cursor's monitor center
@@ -473,7 +485,9 @@ unsafe fn on_create(app: &mut App) {
             mk_button(cw - sc(24) - sc(26), sc(78) + sc(7), sc(24), sc(24), ID_EYE);
             mk_button(cw - sc(24 + 104), sc(252 - 22 - 36), sc(104), sc(36), ID_PRIMARY);
         }
-        Mode::Unlock { .. } => {
+        // Unlock and Delete share the same single-field layout
+        Mode::Unlock { .. } | Mode::Delete { .. } => {
+            let is_delete = matches!(app.mode, Mode::Delete { .. });
             app.edit = mk_edit(sc(78), sc(38), (ES_PASSWORD | ES_AUTOHSCROLL) as u32, ID_EDIT);
             set_cue(app.edit, "Password");
             // eye toggle in the gutter, fully right of the EDIT
@@ -482,10 +496,15 @@ unsafe fn on_create(app: &mut App) {
             // "Use recovery code" underlined text link (left-aligned, drawn as link)
             mk_button(sc(24), sc(214 - 22 - 32), sc(160), sc(28), ID_LINK);
             // read container stats for the subtitle + lockout state
-            if let Mode::Unlock { container } = &app.mode {
-                if let Ok(h) = vault_core::format::inspect(container, &app.hmac_key) {
+            let container = match &app.mode {
+                Mode::Unlock { container } | Mode::Delete { container } => Some(container.clone()),
+                _ => None,
+            };
+            if let Some(container) = container {
+                if let Ok(h) = vault_core::format::inspect(&container, &app.hmac_key) {
                     let mb = h.payload_len as f64 / (1024.0 * 1024.0);
-                    app.subtitle = format!("Locked folder · {mb:.1} MB");
+                    let lead = if is_delete { "Delete locked folder" } else { "Locked folder" };
+                    app.subtitle = format!("{lead} · {mb:.1} MB");
                     app.fail_count = if h.hmac_ok { h.lockout.fail_count } else { MAX_ATTEMPTS - 1 };
                     app.master_available = vault_core::recovery::is_enrolled(&h.wrapped_dk_mk);
                     let now = now_unix();
@@ -611,10 +630,17 @@ unsafe fn on_paint(app: &mut App) {
             let mut r = RECT { left: s(app, 24), top: y + s(app, 12), right: cw - s(app, 24), bottom: y + s(app, 32) };
             let verb = match app.mode {
                 Mode::Lock { .. } => "Encrypting",
+                Mode::Delete { .. } => "Deleting",
                 _ => "Decrypting",
             };
+            // delete has no byte progress; show a plain working label
+            let label = if matches!(app.mode, Mode::Delete { .. }) {
+                format!("{verb}…")
+            } else {
+                format!("{verb}… {}%", app.progress_pct)
+            };
             draw_text(hdc, app.fonts.small, MUTED, &mut r,
-                &format!("{verb}… {}%", app.progress_pct), DT_SINGLELINE.0 | DT_NOPREFIX.0);
+                &label, DT_SINGLELINE.0 | DT_NOPREFIX.0);
         }
         _ => {
             // field borders behind the edit controls (fields at y=78, y=122, h=38)
@@ -630,8 +656,8 @@ unsafe fn on_paint(app: &mut App) {
             if let Mode::Setup { .. } = app.mode {
                 draw_field_border(app, hdc, s(app, 24), s(app, 80), cw - s(app, 48), s(app, 68));
             }
-            // attempt dots + label on ONE row (unlock only), below the field
-            if let Mode::Unlock { .. } = app.mode {
+            // attempt dots + label on ONE row (unlock/delete), below the field
+            if matches!(app.mode, Mode::Unlock { .. } | Mode::Delete { .. }) {
                 let dots_y = s(app, 126);
                 let d = s(app, 7);
                 for i in 0..MAX_ATTEMPTS as i32 {
@@ -775,7 +801,17 @@ unsafe fn on_drawitem(app: &mut App, dis: &DRAWITEMSTRUCT) {
             let clr = CreateSolidBrush(BG);
             FillRect(hdc, &rc, clr);
             let _ = DeleteObject(clr);
-            let bg = if pressed { rgb(0xC9, 0xA2, 0x38) } else { ACCENT };
+            // Delete is a destructive action -> red button + white label;
+            // everything else uses the gold accent.
+            let is_delete = matches!(app.mode, Mode::Delete { .. });
+            let bg = if is_delete {
+                if pressed { rgb(0xB0, 0x3A, 0x39) } else { DANGER }
+            } else if pressed {
+                rgb(0xC9, 0xA2, 0x38)
+            } else {
+                ACCENT
+            };
+            let fg = if is_delete { rgb(0xFF, 0xFF, 0xFF) } else { ON_ACCENT };
             let pen = CreatePen(PS_SOLID, 1, bg);
             let brush = CreateSolidBrush(bg);
             let op = SelectObject(hdc, pen);
@@ -789,9 +825,10 @@ unsafe fn on_drawitem(app: &mut App, dis: &DRAWITEMSTRUCT) {
             let label = match app.mode {
                 Mode::Lock { .. } => "Lock",
                 Mode::Unlock { .. } => "Unlock",
+                Mode::Delete { .. } => "Delete",
                 Mode::Setup { .. } => "I saved it",
             };
-            draw_text(hdc, app.fonts.button, ON_ACCENT, &mut rc, label,
+            draw_text(hdc, app.fonts.button, fg, &mut rc, label,
                 DT_SINGLELINE.0 | DT_VCENTER.0 | 0x0001 /*DT_CENTER*/ | DT_NOPREFIX.0);
         }
         ID_CLOSE => {
@@ -870,7 +907,7 @@ unsafe fn on_toggle_master(app: &mut App) {
             app.status_color = OK_GREEN;
             let _ = InvalidateRect(app.hwnd, None, true);
         }
-        Mode::Unlock { .. } => {
+        Mode::Unlock { .. } | Mode::Delete { .. } => {
             if !app.master_available && !app.master_mode {
                 app.status = "No recovery code was set up for this folder".into();
                 app.status_color = WARN;
@@ -950,6 +987,26 @@ unsafe fn on_primary(app: &mut App) {
                     Credential::Password(secret.as_bytes())
                 };
                 unlock_container(&container, cred, &hmac_key, now_unix(), journal.as_ref(), progress)
+            });
+        }
+        Mode::Delete { container } => {
+            let secret = get_text(app.edit);
+            if secret.is_empty() {
+                set_status(app, if app.master_mode { "Enter your recovery code" } else { "Enter the password" }, WARN);
+                return;
+            }
+            let container = container.clone();
+            let master = app.master_mode;
+            start_busy(app);
+            spawn_worker(app, move |hmac_key, _mp, _progress| {
+                let cred = if master {
+                    Credential::MasterCode(&secret)
+                } else {
+                    Credential::Password(secret.as_bytes())
+                };
+                // return the container path on success so on_done refreshes
+                // Explorer for its parent, same as unlock.
+                verify_and_delete(&container, cred, &hmac_key, now_unix()).map(|()| container.clone())
             });
         }
     }

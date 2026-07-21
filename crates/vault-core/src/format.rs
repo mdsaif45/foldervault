@@ -329,22 +329,21 @@ fn write_container(
     Ok(uuid)
 }
 
-/// Decrypt a container back into its folder, then delete the container.
-/// A wrong password mutates the lockout state in the container header before
-/// returning; the master code path bypasses the lockout entirely. Extraction
-/// goes to `<name>.__restoring` and is renamed into place only when complete
-/// — a failure never leaves a half-restored folder.
-pub fn unlock_container(
+/// Shared prologue for unlock/delete: open the container, verify the
+/// credential against the header, and mutate the lockout state accordingly.
+///
+/// On success returns the opened handle (seeked past the header is the
+/// caller's job), the parsed header, the recovered data key, and whether the
+/// file was read-only on entry (so the caller can re-arm the guard on a later
+/// error). A wrong password rewrites the incremented lockout counter and
+/// re-arms read-only before returning the error; the master code bypasses the
+/// lockout. Read-only is cleared on entry so the header can be rewritten.
+fn open_and_authorize(
     container: &Path,
     credential: Credential<'_>,
     hmac_key: &[u8; 32],
     now_unix: u64,
-    journal: Option<&Journal>,
-    progress: &mut dyn FnMut(u64, u64),
-) -> Result<PathBuf> {
-    // the container may be read-only (delete guard set at lock time); clear it
-    // so we can rewrite the lockout header on a wrong-password attempt. If we
-    // then return without extracting (locked out / wrong password), re-arm it.
+) -> Result<(File, Header, SecretKey, bool)> {
     let was_readonly = std::fs::metadata(container).map(|m| m.permissions().readonly()).unwrap_or(false);
     if was_readonly {
         let _ = crate::trash::set_readonly(container, false);
@@ -402,6 +401,52 @@ pub fn unlock_container(
         header.lockout.reset();
         rewrite_header(&mut f, &header, hmac_key)?;
     }
+    Ok((f, header, dk, was_readonly))
+}
+
+/// Verify the password/recovery code and, on success, recycle the container
+/// (recoverable from the Recycle Bin). Shares the exact lockout behavior of
+/// unlock — 3 wrong attempts arm the 24 h lockout — so the delete prompt can't
+/// be used as an unlimited password oracle. Does NOT extract anything.
+///
+/// This is a *password convenience* on top of the file's own deletability, not
+/// an enforcement mechanism: the built-in Windows Delete still works (see
+/// docs/THREAT-MODEL.md).
+pub fn verify_and_delete(
+    container: &Path,
+    credential: Credential<'_>,
+    hmac_key: &[u8; 32],
+    now_unix: u64,
+) -> Result<()> {
+    let (f, _header, _dk, _was_readonly) =
+        open_and_authorize(container, credential, hmac_key, now_unix)?;
+    drop(f); // close before deleting
+    // credential verified: clear the read-only guard and recycle.
+    let _ = crate::trash::set_readonly(container, false);
+    crate::trash::recycle(container)?;
+    Ok(())
+}
+
+/// Decrypt a container back into its folder, then delete the container.
+/// A wrong password mutates the lockout state in the container header before
+/// returning; the master code path bypasses the lockout entirely. Extraction
+/// goes to `<name>.__restoring` and is renamed into place only when complete
+/// — a failure never leaves a half-restored folder.
+pub fn unlock_container(
+    container: &Path,
+    credential: Credential<'_>,
+    hmac_key: &[u8; 32],
+    now_unix: u64,
+    journal: Option<&Journal>,
+    progress: &mut dyn FnMut(u64, u64),
+) -> Result<PathBuf> {
+    let (mut f, header, dk, was_readonly) =
+        open_and_authorize(container, credential, hmac_key, now_unix)?;
+    let rearm = |c: &Path| {
+        if was_readonly {
+            let _ = crate::trash::set_readonly(c, true);
+        }
+    };
 
     // from here on, any error leaves the container in place; re-arm its
     // read-only guard on the way out.

@@ -14,22 +14,35 @@
 - **Deletion / ransom**: anyone with file access can delete `Photos.fvlt`.
   Encryption protects secrecy, not availability. Backups are the answer.
 
-  FolderVault adds two *friction* layers, not guarantees:
+  FolderVault adds *friction* layers, not guarantees:
   - the locked `.fvlt` is marked **read-only**, so Explorer shows a
     delete-confirmation prompt (stops a careless single click, not a
     determined delete);
   - deletions FolderVault performs itself (the original folder on lock, the
-    container on unlock) go to the **Recycle Bin**, so an accidental
-    lock/unlock is recoverable.
+    container on unlock/delete) go to the **Recycle Bin**, so an accidental
+    operation is recoverable;
+  - a **"Delete with FolderVault"** right-click verb (and `fvlt delete`) asks
+    for the password/recovery code before recycling — sharing unlock's
+    3-attempt / 24 h lockout so it isn't an unlimited password oracle.
 
-  Neither can truly *prevent* deletion: the file is yours on your disk, so
+  None of these truly *prevent* deletion: the file is yours on your disk, so
   you (or malware running as you, or another OS) can always clear the
-  read-only bit and delete it. A "password required to delete" feature is on
-  the roadmap, but be clear-eyed that it can only ever be another
-  confirmation prompt from *our* app — the shell's own Delete, `del` from a
-  prompt, or a live USB bypass it entirely. The only real protection against
-  losing data is a backup / second encrypted copy somewhere the attacker
-  can't reach.
+  read-only bit and use the OS's own Delete / `del` / a live USB. The password
+  verb is a **convenience gate on FolderVault's delete path, not enforcement**
+  — it does not remove or intercept Windows' built-in Delete.
+
+  Roadmap toward real enforcement (each with honest limits):
+  - **v0.3 — ACL deny-delete**: on lock, set a DACL that denies `DELETE` to the
+    user's SID; the verb/unlock clears it after a password check. This *does*
+    block Explorer Delete, Shift+Del, `del`, and `Remove-Item` for a standard
+    user — bypassable only by take-ownership/admin or another OS. No driver,
+    no admin to set.
+  - **out of scope — kernel minifilter driver**: the only true block (even
+    admin/Shift+Del), but needs a signed driver + admin install and contradicts
+    the lightweight, low-risk goal.
+
+  The only real protection against losing data remains a backup / second
+  encrypted copy somewhere the attacker can't reach.
 - **Malware running as you while the folder is unlocked**: once extracted,
   files are plaintext on disk.
 - **Forgotten password + lost master key**: unrecoverable by design. No backdoor.
