@@ -71,8 +71,16 @@ foldervault/
 │   └── vault-shellext/  # IExplorerCommand COM DLL for the Win11 top-level menu
 ├── installer/           # build-release.ps1, Inno Setup script, MSIX manifest, icon gen
 ├── assets/              # app.ico (padlock) + locked-folder.ico
-└── docs/                # PLAN, SPEC, THREAT-MODEL, RELEASING
+└── docs/                # PLAN, SPEC, THREAT-MODEL, RELEASING, VERSIONING
 ```
+
+## Project docs
+
+- [CHANGELOG.md](CHANGELOG.md) — what changed in each release.
+- [docs/VERSIONING.md](docs/VERSIONING.md) — SemVer policy; how versions are
+  decided; security fixes ship immediately as a patch.
+- [CONTRIBUTING.md](CONTRIBUTING.md) — issue → branch → PR workflow.
+- [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md) — what it does and doesn't protect.
 
 ## Building from source
 
