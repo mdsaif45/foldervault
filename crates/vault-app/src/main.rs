@@ -72,8 +72,16 @@ fn main() {
     }
 }
 
-/// Register the shell entries and, if missing, generate + show the master
-/// recovery code. Returns the master public key.
+/// Register the shell entries and, if no master key is enrolled yet, generate
+/// one and show the recovery code. Returns the enrolled master public key, or
+/// `None` if none is enrolled.
+///
+/// Critical: the master public key is persisted ONLY after the user confirms
+/// they saved the one-time code ("I saved it" -> `run_dialog` returns true).
+/// If they dismiss the dialog (X / Esc), nothing is enrolled — otherwise a
+/// user who never saw/saved the code would have an unrecoverable master key
+/// sealed into every future container. Dismissing just means "no recovery key
+/// yet"; a later run re-offers setup with a fresh code.
 fn run_setup(dir: &std::path::Path, exe: &std::path::Path, hmac_key: [u8; 32]) -> Option<[u8; 32]> {
     if let Err(e) = shell::register(exe) {
         msgbox(&format!("Could not register Explorer integration:\n{e}"));
@@ -82,10 +90,14 @@ fn run_setup(dir: &std::path::Path, exe: &std::path::Path, hmac_key: [u8; 32]) -
         return Some(existing);
     }
     let pair = vault_core::recovery::generate();
+    let confirmed = ui::run_dialog(ui::Mode::Setup { code: pair.code }, hmac_key, None);
+    if !confirmed {
+        // user dismissed without saving the code -> do NOT enroll
+        return None;
+    }
     if let Err(e) = shell::save_master_pub(dir, &pair.public) {
         msgbox(&format!("Could not save the master key:\n{e}"));
         return None;
     }
-    ui::run_dialog(ui::Mode::Setup { code: pair.code }, hmac_key, Some(pair.public));
     Some(pair.public)
 }

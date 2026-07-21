@@ -104,9 +104,44 @@ fn rewrite_header(f: &mut File, header: &Header, hmac_key: &[u8; 32]) -> Result<
     Ok(())
 }
 
+/// Windows reserved device names (case-insensitive, with or without an
+/// extension) that must never be created as a path component.
+const RESERVED_NAMES: &[&str] = &[
+    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+];
+
+/// Is this component name safe to create on disk? Rejects anything that Windows
+/// would reinterpret as a drive prefix or alternate data stream (`:`), or that
+/// names a reserved device (`CON`, `COM1`, …), plus other unsafe characters.
+fn is_safe_component(name: &str) -> bool {
+    if name.is_empty() || name == "." || name == ".." {
+        return false;
+    }
+    // A colon anywhere makes Rust's Path treat `b:` as a drive prefix (which
+    // silently drops the root on push) or opens an NTFS alternate data stream.
+    // Other chars below are invalid in Windows filenames and never legitimate.
+    if name.chars().any(|c| matches!(c, ':' | '\\' | '/' | '<' | '>' | '"' | '|' | '?' | '*')
+        || (c as u32) < 0x20)
+    {
+        return false;
+    }
+    // reserved device name = the stem before the first '.' (case-insensitive)
+    let stem = name.split('.').next().unwrap_or(name);
+    if RESERVED_NAMES.iter().any(|r| r.eq_ignore_ascii_case(stem)) {
+        return false;
+    }
+    // trailing space or dot is stripped by Windows and can cause aliasing
+    if name.ends_with(' ') || name.ends_with('.') {
+        return false;
+    }
+    true
+}
+
 /// Join a manifest-relative path onto `root`, rejecting anything that could
-/// escape it (`..`, absolute paths, drive prefixes). Defense against a
-/// crafted container performing path traversal on unlock.
+/// escape it (`..`, absolute paths, drive prefixes), open an NTFS alternate
+/// data stream, or alias a reserved device. Defense against a crafted
+/// container performing path traversal on unlock.
 pub(crate) fn safe_join(root: &Path, rel: &str) -> Result<PathBuf> {
     if rel.is_empty() {
         return Err(VaultError::Tampered);
@@ -114,7 +149,13 @@ pub(crate) fn safe_join(root: &Path, rel: &str) -> Result<PathBuf> {
     let mut out = root.to_path_buf();
     for comp in Path::new(rel).components() {
         match comp {
-            Component::Normal(c) => out.push(c),
+            Component::Normal(c) => {
+                let name = c.to_str().ok_or(VaultError::Tampered)?;
+                if !is_safe_component(name) {
+                    return Err(VaultError::Tampered);
+                }
+                out.push(name);
+            }
             _ => return Err(VaultError::Tampered),
         }
     }
@@ -626,12 +667,34 @@ mod tests {
     #[test]
     fn safe_join_rejects_escapes() {
         let root = Path::new("out");
+        // legitimate paths
         assert!(safe_join(root, "a/b.txt").is_ok());
+        assert!(safe_join(root, "sub/inner/file.dat").is_ok());
+        assert!(safe_join(root, "файл-日本語.txt").is_ok());
+        // traversal / absolute / drive
         assert!(safe_join(root, "..").is_err());
         assert!(safe_join(root, "a/../../b").is_err());
         assert!(safe_join(root, "/etc/passwd").is_err());
         assert!(safe_join(root, "C:/windows/system32").is_err());
         assert!(safe_join(root, "").is_err());
+        // colon: NTFS alternate data stream AND the b: drive-prefix escape
+        assert!(safe_join(root, "secret.txt:hidden").is_err());
+        assert!(safe_join(root, "a/b:c").is_err(), "colon component drops the root via push");
+        // ensure the escaping case stays *inside* root would-be output is refused,
+        // not silently rerooted
+        assert!(!safe_join(root, "a/b:c").map(|p| p.starts_with("out")).unwrap_or(false));
+        // reserved device names (with/without extension, any case)
+        assert!(safe_join(root, "CON").is_err());
+        assert!(safe_join(root, "com1.txt").is_err());
+        assert!(safe_join(root, "sub/NUL").is_err());
+        assert!(safe_join(root, "LpT9").is_err());
+        // other invalid chars + trailing dot/space
+        assert!(safe_join(root, "a<b").is_err());
+        assert!(safe_join(root, "name ").is_err());
+        assert!(safe_join(root, "name.").is_err());
+        // 'contains' but legitimate: a reserved word as a substring is fine
+        assert!(safe_join(root, "console.log").is_ok());
+        assert!(safe_join(root, "com10.txt").is_ok());
     }
 
     #[test]

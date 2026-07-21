@@ -51,8 +51,43 @@ impl Default for KdfParams {
     }
 }
 
+// Sane bounds for KDF params read from an (untrusted) container header. Argon2
+// itself accepts m_cost up to ~4 TiB, so an unclamped header value would make
+// `derive_kek` attempt a multi-terabyte allocation -> OOM/abort when opening a
+// crafted `.fvlt`. These bounds comfortably span every parameter set we would
+// ever write (default is 64 MiB / t=3 / 4 lanes) while capping the memory a
+// hostile header can demand at 1 GiB.
+// The ceiling is the security-relevant bound (blocks the OOM DoS); the floor
+// is Argon2's own minimum (m_cost >= 8*lanes KiB), kept low so it never
+// rejects a legitimately weak-but-valid param set.
+const MIN_M_COST_KIB: u32 = 1024; //  1 MiB floor
+const MAX_M_COST_KIB: u32 = 1024 * 1024; // 1 GiB ceiling
+const MAX_T_COST: u32 = 16;
+const MAX_LANES: u32 = 16;
+
+impl KdfParams {
+    /// Reject params outside the accepted range. Called before `derive_kek`
+    /// on the untrusted header path so a crafted container can't force a huge
+    /// allocation. Our own containers always satisfy this.
+    pub fn validate(&self) -> Result<()> {
+        let ok = (MIN_M_COST_KIB..=MAX_M_COST_KIB).contains(&self.m_cost_kib)
+            && (1..=MAX_T_COST).contains(&self.t_cost)
+            && (1..=MAX_LANES).contains(&self.lanes);
+        if ok {
+            Ok(())
+        } else {
+            Err(VaultError::Tampered)
+        }
+    }
+}
+
 /// Argon2id: password + salt -> 256-bit key-encryption key.
+///
+/// `p` must come from a trusted source or have passed [`KdfParams::validate`];
+/// this function also validates defensively so no caller can trigger a
+/// pathological allocation.
 pub fn derive_kek(password: &[u8], salt: &[u8; 16], p: &KdfParams) -> Result<SecretKey> {
+    p.validate()?;
     let params = argon2::Params::new(p.m_cost_kib, p.t_cost, p.lanes, Some(KEY_LEN))
         .map_err(|e| VaultError::Other(format!("bad KDF params: {e}")))?;
     let argon = argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
@@ -158,6 +193,22 @@ mod tests {
         let c = derive_kek(b"hunter2", &[8u8; 16], &p).unwrap();
         assert_eq!(a.0, b.0);
         assert_ne!(a.0, c.0);
+    }
+
+    #[test]
+    fn kdf_params_reject_out_of_range() {
+        // the attack: a crafted header with a multi-TB m_cost -> OOM on unlock
+        let huge = KdfParams { m_cost_kib: u32::MAX, t_cost: 3, lanes: 4 };
+        assert!(huge.validate().is_err());
+        // derive_kek must refuse it BEFORE allocating (returns Err, no OOM)
+        assert!(derive_kek(b"pw", &[0u8; 16], &huge).is_err());
+        // other out-of-range values
+        assert!(KdfParams { m_cost_kib: 0, t_cost: 3, lanes: 4 }.validate().is_err());
+        assert!(KdfParams { m_cost_kib: 64 * 1024, t_cost: 0, lanes: 4 }.validate().is_err());
+        assert!(KdfParams { m_cost_kib: 64 * 1024, t_cost: 3, lanes: 999 }.validate().is_err());
+        // the real default and the cheap test params are both accepted
+        assert!(KdfParams::default().validate().is_ok());
+        assert!(test_kdf().validate().is_ok());
     }
 
     #[test]

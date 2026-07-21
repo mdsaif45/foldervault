@@ -322,7 +322,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             match id {
                 ID_PRIMARY => on_primary(app),
                 ID_CLOSE => {
-                    let _ = DestroyWindow(hwnd);
+                    // Don't tear down mid-operation: a lock/unlock/delete worker
+                    // is writing the filesystem, and the process would be killed
+                    // at an arbitrary point (partial container / orphaned
+                    // original). Ignore close (X and Esc/IDCANCEL both land here)
+                    // while busy; the op completes and closes the window itself.
+                    if !matches!(app.phase, Phase::Busy) {
+                        let _ = DestroyWindow(hwnd);
+                    }
                 }
                 ID_LINK => on_toggle_master(app),
                 ID_EYE => on_toggle_reveal(app),
