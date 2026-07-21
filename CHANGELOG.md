@@ -8,6 +8,15 @@ See [docs/VERSIONING.md](docs/VERSIONING.md) for how versions are decided.
 
 ## [Unreleased]
 
+### Fixed
+- Locking a folder while a file inside it is still being written no longer
+  silently stores a truncated copy — the lock now aborts with a "changed while
+  locking" error instead.
+- The password-delete flow re-arms the read-only guard if recycling the
+  container fails, so a failed delete can't leave the file unprotected.
+- The per-install key is never written in an unreadable state if the OS
+  key-protection call fails (it now reports an error instead).
+
 ## [0.2.1] - 2026-07-21
 
 ### Security

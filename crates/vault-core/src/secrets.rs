@@ -13,7 +13,6 @@
 use std::path::{Path, PathBuf};
 
 use crate::crypto::random_bytes;
-use crate::recovery::MASTER_WRAP_LEN;
 
 const DPAPI_MAGIC: &[u8; 4] = b"FVP1"; // FolderVault Protected v1
 
@@ -74,21 +73,23 @@ fn read_protected(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
 }
 
 fn write_protected(path: &Path, plain: &[u8]) -> std::io::Result<()> {
-    let mut out = Vec::with_capacity(4 + plain.len() + 64);
+    // protect() returns None only if the OS crypto call fails (essentially
+    // never for a logged-in user). Surface that as an error rather than
+    // writing an FVP1-tagged blob we could never read back.
+    let protected = protect(plain).ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::Other, "DPAPI protect failed")
+    })?;
+    let mut out = Vec::with_capacity(4 + protected.len());
     out.extend_from_slice(DPAPI_MAGIC);
-    out.extend_from_slice(&protect(plain));
+    out.extend_from_slice(&protected);
     std::fs::write(path, out)
 }
 
-/// Sanity check that a decoded master wrap is the expected length.
-pub fn is_valid_master_wrap(w: &[u8]) -> bool {
-    w.len() == MASTER_WRAP_LEN
-}
 
 // ---------- platform crypto ----------
 
 #[cfg(windows)]
-fn protect(plain: &[u8]) -> Vec<u8> {
+fn protect(plain: &[u8]) -> Option<Vec<u8>> {
     use windows::Win32::Foundation::{LocalFree, HLOCAL};
     use windows::Win32::Security::Cryptography::{CryptProtectData, CRYPT_INTEGER_BLOB};
     unsafe {
@@ -101,10 +102,13 @@ fn protect(plain: &[u8]) -> Vec<u8> {
             let slice = std::slice::from_raw_parts(out_blob.pbData, out_blob.cbData as usize);
             let v = slice.to_vec();
             let _ = LocalFree(HLOCAL(out_blob.pbData as *mut _));
-            v
+            Some(v)
         } else {
-            // extremely unlikely; fall back to storing raw so we never lose data
-            plain.to_vec()
+            // Essentially never happens for a logged-in user. Do NOT fall back
+            // to storing raw: write_protected always prepends the FVP1 magic,
+            // so a raw blob would fail to DPAPI-decrypt on read (unreadable).
+            // Report failure so the caller surfaces a real error instead.
+            None
         }
     }
 }
@@ -131,8 +135,8 @@ fn unprotect(blob: &[u8]) -> Option<Vec<u8>> {
 }
 
 #[cfg(not(windows))]
-fn protect(plain: &[u8]) -> Vec<u8> {
-    plain.to_vec()
+fn protect(plain: &[u8]) -> Option<Vec<u8>> {
+    Some(plain.to_vec())
 }
 
 #[cfg(not(windows))]
