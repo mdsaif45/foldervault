@@ -351,18 +351,25 @@ fn write_container(
     let mut seq = 0u64;
     let mut done = 0u64;
     for e in entries.iter().filter(|e| !e.is_dir) {
+        let changed = || VaultError::Other(format!("{} changed while locking", e.rel_path));
         let mut f = File::open(safe_join(src, &e.rel_path)?)?;
         let mut remaining = e.size;
         while remaining > 0 {
             let n = remaining.min(CHUNK_SIZE as u64) as usize;
-            f.read_exact(&mut buf[..n]).map_err(|_| {
-                VaultError::Other(format!("{} changed while locking", e.rel_path))
-            })?;
+            // read_exact fails if the file SHRANK since scan (EOF early) ->
+            // abort rather than store a short/garbage copy.
+            f.read_exact(&mut buf[..n]).map_err(|_| changed())?;
             w.write_all(&cipher.seal(seq, &buf[..n]))?;
             seq += 1;
             remaining -= n as u64;
             done += n as u64;
             progress(done, total_bytes);
+        }
+        // If the file GREW since scan, bytes past e.size would be silently
+        // dropped -> the container would hold a truncated copy while lock
+        // reports success. Detect the extra bytes and abort instead.
+        if f.read(&mut buf[..1]).map_err(|_| changed())? != 0 {
+            return Err(changed());
         }
     }
     w.flush()?;
@@ -459,12 +466,20 @@ pub fn verify_and_delete(
     hmac_key: &[u8; 32],
     now_unix: u64,
 ) -> Result<()> {
-    let (f, _header, _dk, _was_readonly) =
+    let (f, _header, _dk, was_readonly) =
         open_and_authorize(container, credential, hmac_key, now_unix)?;
     drop(f); // close before deleting
     // credential verified: clear the read-only guard and recycle.
     let _ = crate::trash::set_readonly(container, false);
-    crate::trash::recycle(container)?;
+    if let Err(e) = crate::trash::recycle(container) {
+        // recycle failed and the container is still here — re-arm the
+        // read-only delete guard we just cleared, so the file isn't left
+        // unprotected after a failed delete.
+        if was_readonly {
+            let _ = crate::trash::set_readonly(container, true);
+        }
+        return Err(e.into());
+    }
     Ok(())
 }
 
