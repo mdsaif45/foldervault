@@ -31,15 +31,24 @@
   verb is a **convenience gate on FolderVault's delete path, not enforcement**
   — it does not remove or intercept Windows' built-in Delete.
 
-  Roadmap toward real enforcement (each with honest limits):
-  - **v0.3 — ACL deny-delete**: on lock, set a DACL that denies `DELETE` to the
-    user's SID; the verb/unlock clears it after a password check. This *does*
-    block Explorer Delete, Shift+Del, `del`, and `Remove-Item` for a standard
-    user — bypassable only by take-ownership/admin or another OS. No driver,
-    no admin to set.
-  - **out of scope — kernel minifilter driver**: the only true block (even
-    admin/Shift+Del), but needs a signed driver + admin install and contradicts
-    the lightweight, low-risk goal.
+  Enforcement options investigated (and why none ship yet):
+  - **File-level deny-delete ACL — tried, DOES NOT WORK reliably.** We
+    prototyped an explicit `DELETE`-deny ACE on the container for the user's
+    SID. It blocks deletion only in directories that don't grant the user
+    `FILE_DELETE_CHILD` on the parent (e.g. a fresh root folder). In the very
+    places people keep folders — `%USERPROFILE%\Documents`, `Desktop`, temp —
+    the parent grants the owner delete-child, which satisfies the delete
+    regardless of the file's own DACL, so the ACE is silently ineffective.
+    Confirmed by measurement (Documents: not blocked; `D:\` fresh dir:
+    blocked). We will not ship a "protection" that quietly does nothing where
+    it matters most. (Denying `FILE_DELETE_CHILD` on the *parent* would block
+    deleting every file in that folder and needs `SeSecurityPrivilege` — not
+    acceptable.)
+  - **out of scope — kernel minifilter driver**: the only mechanism that
+    truly blocks deletion everywhere (even admin/Shift+Del), but needs a
+    signed driver + admin install and contradicts the lightweight, low-risk
+    goal. This is the only real path to hard delete-prevention if it ever
+    becomes a requirement.
 
   The only real protection against losing data remains a backup / second
   encrypted copy somewhere the attacker can't reach.

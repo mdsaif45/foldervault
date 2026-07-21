@@ -174,12 +174,15 @@ never lossy. **At no point can both copies be gone.**
   header/credential/lockout prologue, shares the 3-attempt / 24 h lockout),
   then recycles the container. **Convenience gate, not enforcement** — the OS
   delete still works.
-  - Progression toward real enforcement: **v0.3** applies a deny-delete **ACL**
-    on lock so plain Delete/Shift+Del/`del` are blocked for a standard user
-    (no admin, no driver; take-ownership/another-OS still bypasses). The verb
-    UI is unchanged; only the enforcement gets teeth. A kernel minifilter (the
-    only true block) stays out of scope — needs a signed driver + admin and
-    contradicts the lightweight goal.
+  - **v0.3 ACL deny-delete — investigated and abandoned.** A file-level
+    `DELETE`-deny ACE does NOT block deletion in user-profile folders
+    (Documents/Desktop/temp) because the parent grants the owner
+    `FILE_DELETE_CHILD`; it only works in fresh non-profile dirs. Measured and
+    confirmed, then reverted — we won't ship protection that silently no-ops
+    where users actually keep files. See THREAT-MODEL.md. The only path to a
+    real hard block is a kernel minifilter driver (signed driver + admin),
+    which stays out of scope for the lightweight goal. So v0.2's password verb
+    remains the delete story: an honest *convenience gate*, not enforcement.
 
 ## Performance budget
 
