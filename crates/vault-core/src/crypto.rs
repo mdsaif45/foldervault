@@ -1,6 +1,6 @@
 //! Key derivation, key wrapping, and chunk encryption (SPEC.md "Keys").
 
-use aes_gcm::aead::{Aead, KeyInit, OsRng, Payload};
+use aes_gcm::aead::{Aead, KeyInit, OsRng};
 use aes_gcm::{Aes256Gcm, Nonce};
 use rand_core::RngCore;
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -144,25 +144,62 @@ impl ChunkCipher {
         aad
     }
 
-    /// Frame: nonce (12) | blob_len u32 | ciphertext+tag (blob_len bytes).
-    pub fn seal(&self, seq: u64, plain: &[u8]) -> Vec<u8> {
+    /// Encrypt `plain` and write the frame `nonce (12) | blob_len u32 |
+    /// ciphertext+tag` straight to `w`. `scratch` is a caller-owned buffer
+    /// reused across chunks so no per-chunk allocation happens in the hot loop
+    /// (encryption is done in place, appending the 16-byte tag to `scratch`).
+    pub fn seal_to<W: std::io::Write>(
+        &self,
+        w: &mut W,
+        seq: u64,
+        plain: &[u8],
+        scratch: &mut Vec<u8>,
+    ) -> std::io::Result<()> {
+        use aes_gcm::aead::AeadInPlace;
         let mut nonce = [0u8; NONCE_LEN];
         OsRng.fill_bytes(&mut nonce);
-        let ct = self
-            .cipher
-            .encrypt(Nonce::from_slice(&nonce), Payload { msg: plain, aad: &self.aad(seq) })
+        scratch.clear();
+        scratch.extend_from_slice(plain);
+        self.cipher
+            .encrypt_in_place(Nonce::from_slice(&nonce), &self.aad(seq), scratch)
             .expect("aes-gcm encrypt cannot fail");
-        let mut out = Vec::with_capacity(NONCE_LEN + 4 + ct.len());
-        out.extend_from_slice(&nonce);
-        out.extend_from_slice(&(ct.len() as u32).to_le_bytes());
-        out.extend_from_slice(&ct);
+        w.write_all(&nonce)?;
+        w.write_all(&(scratch.len() as u32).to_le_bytes())?;
+        w.write_all(scratch)?;
+        Ok(())
+    }
+
+    /// Decrypt a frame's `blob` in place. On success `blob` is truncated to the
+    /// plaintext (the tag is stripped); returns the plaintext slice. Reuses the
+    /// caller's frame buffer — no per-chunk allocation.
+    pub fn open_in_place<'a>(
+        &self,
+        seq: u64,
+        nonce: &[u8; NONCE_LEN],
+        blob: &'a mut Vec<u8>,
+    ) -> Result<&'a [u8]> {
+        use aes_gcm::aead::AeadInPlace;
+        self.cipher
+            .decrypt_in_place(Nonce::from_slice(nonce), &self.aad(seq), blob)
+            .map_err(|_| VaultError::Tampered)?;
+        Ok(&blob[..])
+    }
+
+    /// Allocating convenience wrappers, used by unit tests. The hot paths use
+    /// `seal_to` / `open_in_place` above.
+    #[cfg(test)]
+    pub fn seal(&self, seq: u64, plain: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut scratch = Vec::new();
+        self.seal_to(&mut out, seq, plain, &mut scratch).expect("write to Vec");
         out
     }
 
+    #[cfg(test)]
     pub fn open(&self, seq: u64, nonce: &[u8; NONCE_LEN], blob: &[u8]) -> Result<Vec<u8>> {
-        self.cipher
-            .decrypt(Nonce::from_slice(nonce), Payload { msg: blob, aad: &self.aad(seq) })
-            .map_err(|_| VaultError::Tampered)
+        let mut b = blob.to_vec();
+        self.open_in_place(seq, nonce, &mut b)?;
+        Ok(b)
     }
 }
 

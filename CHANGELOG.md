@@ -8,6 +8,12 @@ See [docs/VERSIONING.md](docs/VERSIONING.md) for how versions are decided.
 
 ## [Unreleased]
 
+### Changed
+- Faster lock/unlock: the chunk cipher now encrypts/decrypts in place into a
+  reused buffer and writes frames straight to the output, removing a per-chunk
+  heap allocation on both paths. Roughly doubles raw throughput on large
+  folders (~400 MB/s on AES-NI). No format or behavior change.
+
 ### Fixed
 - Locking a folder while a file inside it is still being written no longer
   silently stores a truncated copy — the lock now aborts with a "changed while

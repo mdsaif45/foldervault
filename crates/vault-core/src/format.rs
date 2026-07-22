@@ -163,6 +163,19 @@ pub(crate) fn safe_join(root: &Path, rel: &str) -> Result<PathBuf> {
 }
 
 fn read_frame(r: &mut impl Read, max_len: usize) -> Result<([u8; NONCE_LEN], Vec<u8>)> {
+    let mut blob = Vec::new();
+    let nonce = read_frame_into(r, max_len, &mut blob)?;
+    Ok((nonce, blob))
+}
+
+/// Like `read_frame`, but reads the blob into the caller's reusable `blob`
+/// buffer (resized to the frame length) instead of allocating a fresh Vec.
+/// Returns the frame nonce.
+fn read_frame_into(
+    r: &mut impl Read,
+    max_len: usize,
+    blob: &mut Vec<u8>,
+) -> Result<[u8; NONCE_LEN]> {
     let mut nonce = [0u8; NONCE_LEN];
     r.read_exact(&mut nonce)?;
     let mut len_bytes = [0u8; 4];
@@ -171,9 +184,10 @@ fn read_frame(r: &mut impl Read, max_len: usize) -> Result<([u8; NONCE_LEN], Vec
     if len < TAG_LEN || len > max_len {
         return Err(VaultError::Tampered);
     }
-    let mut blob = vec![0u8; len];
-    r.read_exact(&mut blob)?;
-    Ok((nonce, blob))
+    blob.clear();
+    blob.resize(len, 0);
+    r.read_exact(blob)?;
+    Ok(nonce)
 }
 
 #[derive(Default)]
@@ -340,12 +354,14 @@ fn write_container(
     w.write_all(&header.to_bytes(hmac_key))?;
 
     let cipher = ChunkCipher::new(&dk, uuid);
+    // reused across chunks so encryption allocates nothing in the hot loop
+    let mut scratch = Vec::with_capacity(CHUNK_SIZE + TAG_LEN);
     let manifest =
         bincode::serialize(entries).map_err(|e| VaultError::Other(format!("manifest: {e}")))?;
     if manifest.len() > MAX_MANIFEST_LEN - TAG_LEN {
         return Err(VaultError::Other("folder has too many entries".into()));
     }
-    w.write_all(&cipher.seal(MANIFEST_SEQ, &manifest))?;
+    cipher.seal_to(&mut w, MANIFEST_SEQ, &manifest, &mut scratch)?;
 
     let mut buf = vec![0u8; CHUNK_SIZE];
     let mut seq = 0u64;
@@ -359,7 +375,7 @@ fn write_container(
             // read_exact fails if the file SHRANK since scan (EOF early) ->
             // abort rather than store a short/garbage copy.
             f.read_exact(&mut buf[..n]).map_err(|_| changed())?;
-            w.write_all(&cipher.seal(seq, &buf[..n]))?;
+            cipher.seal_to(&mut w, seq, &buf[..n], &mut scratch)?;
             seq += 1;
             remaining -= n as u64;
             done += n as u64;
@@ -518,15 +534,16 @@ pub fn unlock_container(
     }
     let mut r = BufReader::with_capacity(CHUNK_SIZE, f);
     let cipher = ChunkCipher::new(&dk, header.uuid);
-    let (nonce, blob) = match read_frame(&mut r, MAX_MANIFEST_LEN) {
+    let mut manifest_buf = Vec::new();
+    let nonce = match read_frame_into(&mut r, MAX_MANIFEST_LEN, &mut manifest_buf) {
         Ok(v) => v,
         Err(e) => bail!(e),
     };
-    let manifest = match cipher.open(MANIFEST_SEQ, &nonce, &blob) {
+    let manifest = match cipher.open_in_place(MANIFEST_SEQ, &nonce, &mut manifest_buf) {
         Ok(m) => m,
         Err(e) => bail!(e),
     };
-    let entries: Vec<Entry> = match bincode::deserialize(&manifest) {
+    let entries: Vec<Entry> = match bincode::deserialize(manifest) {
         Ok(v) => v,
         Err(_) => bail!(VaultError::Tampered),
     };
@@ -592,6 +609,8 @@ fn extract_entries(
 ) -> Result<()> {
     let mut seq = 0u64;
     let mut done = 0u64;
+    // reused across chunks so decryption allocates nothing in the hot loop
+    let mut frame = Vec::with_capacity(CHUNK_SIZE + TAG_LEN);
     for e in entries {
         let target = safe_join(tmpdir, &e.rel_path)?;
         if e.is_dir {
@@ -606,13 +625,13 @@ fn extract_entries(
         let mut remaining = e.size;
         while remaining > 0 {
             let expected = remaining.min(CHUNK_SIZE as u64) as usize;
-            let (nonce, blob) = read_frame(r, CHUNK_SIZE + TAG_LEN)?;
-            let plain = cipher.open(seq, &nonce, &blob)?;
+            let nonce = read_frame_into(r, CHUNK_SIZE + TAG_LEN, &mut frame)?;
+            let plain = cipher.open_in_place(seq, &nonce, &mut frame)?;
             seq += 1;
             if plain.len() != expected {
                 return Err(VaultError::Tampered);
             }
-            w.write_all(&plain)?;
+            w.write_all(plain)?;
             remaining -= expected as u64;
             done += expected as u64;
             progress(done, payload_len);
