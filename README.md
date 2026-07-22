@@ -18,7 +18,7 @@ All four phases complete; `v0.1.0` is release-ready.
 | `FolderVault.exe` | ~350 KB |
 | `fvlt.exe` (CLI) | ~310 KB |
 | `vault_shellext.dll` (Win11 menu) | ~110 KB |
-| Encryption throughput | ~190 MB/s (AES-NI) |
+| Encryption throughput | ~400 MB/s (AES-NI, in-place chunk cipher) |
 | Tests | 30 (crypto, format, lockout, journal, recovery, DPAPI) |
 | Resident processes | 0 |
 
