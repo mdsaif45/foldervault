@@ -3,6 +3,9 @@
 Thanks for your interest. This is a small, security-sensitive project, so the
 workflow is deliberately simple and explicit.
 
+By participating, you agree to abide by our
+[Code of Conduct](CODE_OF_CONDUCT.md).
+
 ## Development workflow
 
 Every change flows through an issue, a branch, and a pull request:
