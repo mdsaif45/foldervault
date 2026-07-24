@@ -30,11 +30,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
     LoadCursorW, PostMessageW, PostQuitMessage, RegisterClassExW, SendMessageW, SetTimer,
     SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage, BS_OWNERDRAW,
     CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, ES_AUTOHSCROLL, ES_MULTILINE, ES_PASSWORD,
-    ES_READONLY, GWLP_USERDATA, HMENU, HWND_TOP, IDC_ARROW, MSG, SWP_NOSIZE,
+    ES_READONLY, GWLP_USERDATA, HMENU, HWND_TOP, IDC_ARROW, IDC_HAND, MSG, SWP_NOSIZE,
     SWP_NOZORDER, SW_HIDE, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_COMMAND, WM_CREATE,
-    SetForegroundWindow,
+    SetCursor, SetForegroundWindow,
     WM_CTLCOLOREDIT, WM_DESTROY, WM_DRAWITEM, WM_LBUTTONDOWN, WM_NCHITTEST, WM_PAINT,
-    WM_SETFOCUS, WM_SETFONT, WM_TIMER, WNDCLASSEXW, WS_CHILD, WS_CLIPCHILDREN, WS_EX_APPWINDOW,
+    WM_SETCURSOR, WM_SETFOCUS, WM_SETFONT, WM_TIMER, WNDCLASSEXW, WS_CHILD, WS_CLIPCHILDREN,
+    WS_EX_APPWINDOW,
     WS_EX_CONTROLPARENT, WS_EX_TOPMOST, WS_POPUP, WS_TABSTOP, WS_VISIBLE,
 };
 
@@ -103,6 +104,12 @@ struct App {
     hwnd: HWND,
     edit: HWND,
     edit2: HWND, // confirm (lock) — hidden otherwise
+    // clickable controls that should show a hand cursor on hover
+    link: HWND,
+    eye: HWND,
+    close: HWND,
+    primary: HWND,
+    hand: windows::Win32::UI::WindowsAndMessaging::HCURSOR,
     dpi: f32,
     title: String,
     subtitle: String,
@@ -192,6 +199,11 @@ pub fn run_dialog(mode: Mode, hmac_key: [u8; 32], master_pub: Option<[u8; 32]>) 
             hwnd: HWND::default(),
             edit: HWND::default(),
             edit2: HWND::default(),
+            link: HWND::default(),
+            eye: HWND::default(),
+            close: HWND::default(),
+            primary: HWND::default(),
+            hand: windows::Win32::UI::WindowsAndMessaging::HCURSOR::default(),
             dpi: 1.0,
             status: String::new(),
             status_color: MUTED,
@@ -347,6 +359,20 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             LRESULT(0)
         }
+        WM_SETCURSOR => {
+            // wparam is the window under the cursor; show a hand over the
+            // clickable owner-drawn controls (link, eye, close, primary button).
+            let under = HWND(wparam.0 as *mut _);
+            let clickable = under == app.link
+                || under == app.eye
+                || under == app.close
+                || under == app.primary;
+            if clickable && !app.hand.is_invalid() {
+                SetCursor(app.hand);
+                return LRESULT(1);
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
         WM_NCHITTEST => {
             // whole background drags the window (client area minus controls)
             let hit = DefWindowProcW(hwnd, msg, wparam, lparam);
@@ -489,8 +515,8 @@ unsafe fn on_create(app: &mut App) {
             set_cue(app.edit, "Password");
             set_cue(app.edit2, "Confirm password");
             // eye toggle in the gutter, fully right of the EDIT (ends at cw-52)
-            mk_button(cw - sc(24) - sc(26), sc(78) + sc(7), sc(24), sc(24), ID_EYE);
-            mk_button(cw - sc(24 + 104), sc(252 - 22 - 36), sc(104), sc(36), ID_PRIMARY);
+            app.eye = mk_button(cw - sc(24) - sc(26), sc(78) + sc(7), sc(24), sc(24), ID_EYE);
+            app.primary = mk_button(cw - sc(24 + 104), sc(252 - 22 - 36), sc(104), sc(36), ID_PRIMARY);
         }
         // Unlock and Delete share the same single-field layout
         Mode::Unlock { .. } | Mode::Delete { .. } => {
@@ -498,10 +524,10 @@ unsafe fn on_create(app: &mut App) {
             app.edit = mk_edit(sc(78), sc(38), (ES_PASSWORD | ES_AUTOHSCROLL) as u32, ID_EDIT);
             set_cue(app.edit, "Password");
             // eye toggle in the gutter, fully right of the EDIT
-            mk_button(cw - sc(24) - sc(26), sc(78) + sc(7), sc(24), sc(24), ID_EYE);
-            mk_button(cw - sc(24 + 104), sc(214 - 22 - 36), sc(104), sc(36), ID_PRIMARY);
+            app.eye = mk_button(cw - sc(24) - sc(26), sc(78) + sc(7), sc(24), sc(24), ID_EYE);
+            app.primary = mk_button(cw - sc(24 + 104), sc(214 - 22 - 36), sc(104), sc(36), ID_PRIMARY);
             // "Use recovery code" underlined text link (left-aligned, drawn as link)
-            mk_button(sc(24), sc(214 - 22 - 32), sc(160), sc(28), ID_LINK);
+            app.link = mk_button(sc(24), sc(214 - 22 - 32), sc(160), sc(28), ID_LINK);
             // read container stats for the subtitle + lockout state
             let container = match &app.mode {
                 Mode::Unlock { container } | Mode::Delete { container } => Some(container.clone()),
@@ -544,8 +570,8 @@ unsafe fn on_create(app: &mut App) {
             )
             .unwrap_or_default();
             SendMessageW(app.edit, WM_SETFONT, WPARAM(app.fonts.code.0 as usize), LPARAM(1));
-            mk_button(cw - sc(24 + 120), sc(268 - 22 - 36), sc(120), sc(36), ID_PRIMARY);
-            mk_button(sc(24), sc(268 - 22 - 36), sc(92), sc(36), ID_LINK); // Copy
+            app.primary = mk_button(cw - sc(24 + 120), sc(268 - 22 - 36), sc(120), sc(36), ID_PRIMARY);
+            app.link = mk_button(sc(24), sc(268 - 22 - 36), sc(92), sc(36), ID_LINK); // Copy
             app.status = "Anyone with this code can unlock your folders. Store it safely — \
                           it is shown only once.".into();
             app.status_color = MUTED;
@@ -557,7 +583,10 @@ unsafe fn on_create(app: &mut App) {
         }
     }
     // close ✕
-    mk_button(cw - sc(40), sc(14), sc(26), sc(26), ID_CLOSE);
+    app.close = mk_button(cw - sc(40), sc(14), sc(26), sc(26), ID_CLOSE);
+
+    // hand (pointer) cursor for hovering the clickable link / eye / close / button
+    app.hand = LoadCursorW(None, IDC_HAND).unwrap_or_default();
 }
 
 fn set_cue(edit: HWND, text: &str) {
@@ -600,7 +629,7 @@ unsafe fn on_paint(app: &mut App) {
     let bbrush = CreateSolidBrush(BADGE_BG);
     let op = SelectObject(hdc, bpen);
     let ob = SelectObject(hdc, bbrush);
-    let br = s(app, 9);
+    let br = s(app, 12); // rounder badge, matching the mockup
     let _ = RoundRect(hdc, badge.left, badge.top, badge.right, badge.bottom, br, br);
     SelectObject(hdc, op);
     SelectObject(hdc, ob);
