@@ -1,0 +1,48 @@
+// Slint: you DESCRIBE the UI in this .slint file (its own language, with a
+// live VS Code preview + an online designer). This is the whole dialog.
+import { LineEdit, Button } from "std-widgets.slint";
+
+export component Unlock inherits Window {
+    title: "Unlock";
+    width: 420px; height: 240px;
+    background: #1e1e24;
+    in-out property <int> fails: 1;
+
+    VerticalBox := VerticalLayout {
+        padding: 20px; spacing: 14px;
+
+        // header row
+        HorizontalLayout {
+            spacing: 12px;
+            Rectangle {
+                width: 40px; height: 40px; border-radius: 10px; background: #2c2c36;
+                Text { text: "🔒"; color: #e1b94a; font-size: 20px; }
+            }
+            VerticalLayout {
+                Text { text: "Photos"; color: #ececf0; font-size: 16px; font-weight: 600; }
+                Text { text: "Locked folder · 2.4 GB"; color: #8b8b96; font-size: 12px; }
+            }
+        }
+
+        // password field (built-in widget)
+        LineEdit { placeholder-text: "Password"; }
+
+        // attempt dots + label
+        HorizontalLayout {
+            for i in 3 : Text {
+                text: "●"; font-size: 10px;
+                color: i < fails ? #e24b4a : #3a3a44;
+            }
+            Rectangle {}  // spacer
+            Text { text: (3 - fails) + " attempts remaining"; color: #d89a3e; }
+        }
+
+        // link + button row
+        HorizontalLayout {
+            Text { text: "Use master password"; color: #8b8b96; }
+            Rectangle {}
+            Button { text: "Unlock"; primary: true;
+                     clicked => { fails = min(fails + 1, 3); } }
+        }
+    }
+}
